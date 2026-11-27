@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
-import { appClient, superClient, makeFixture, dsj, post, actAs, authOf, expectCode, TEST_URL, type Fixture } from './helpers.js';
+import { appClient, superClient, makeFixture, dsj, post, actAs, authOf, expectCode, waitUntilBlocked, TEST_URL, type Fixture } from './helpers.js';
 
 let db: pg.Client;
 let f: Fixture;
@@ -89,8 +89,9 @@ describe('review: concurrency on first use', () => {
       await poster.query('begin');
       await poster.query('select ledger.post_entry($1::jsonb)', [JSON.stringify(dsj(fx, { lines: [
         { account_id: acct, location_id: fx.locA1, debit: '5' }, { account_id: fx.acct.cash, location_id: fx.locA1, credit: '5' }] }))]);
+      const editorPid = (await editor.query('select pg_backend_pid() p')).rows[0].p;
       const edit = editor.query(`update account set cash_view = 'always' where id = $1`, [acct]).then(() => 'ok', (e) => e.message.split(':')[0]);
-      await new Promise((r) => setTimeout(r, 200));
+      await waitUntilBlocked(editorPid); // the change is waiting on the in-flight post
       await poster.query('commit');
       expect(await edit).toBe('ACCOUNT_IMMUTABLE');
     } finally {
@@ -108,8 +109,9 @@ describe('review: concurrency on first use', () => {
     try {
       await editor.query('begin');
       await editor.query(`update entity set fiscal_calendar = '13_period' where id = $1`, [ent]);
+      const genPid = (await gen.query('select pg_backend_pid() p')).rows[0].p;
       const made = gen.query('select ledger.create_fiscal_year($1, 2027)', [ent]).then(() => 'ok', (e) => e.message.split(':')[0]);
-      await new Promise((r) => setTimeout(r, 200));
+      await waitUntilBlocked(genPid); // generation is waiting on the uncommitted calendar change
       await editor.query('commit');
       expect(await made).toBe('ok');
     } finally {

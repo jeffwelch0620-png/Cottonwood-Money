@@ -59,6 +59,22 @@ export async function createAuthUsers(n: number): Promise<string[]> {
   }
 }
 
+/** Resolves once the backend `pid` is waiting on a lock (the race is really happening), or throws. */
+export async function waitUntilBlocked(pid: number, timeoutMs = 5000) {
+  const su = await superClient();
+  try {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const { rows } = await su.query(`select wait_event_type from pg_stat_activity where pid = $1`, [pid]);
+      if (rows[0]?.wait_event_type === 'Lock') return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error(`backend ${pid} never blocked on a lock: the test did not create the race`);
+  } finally {
+    await su.end();
+  }
+}
+
 /** A superuser connection: used only to simulate attackers and to inspect. */
 export async function superClient(): Promise<pg.Client> {
   const c = new pg.Client({ connectionString: TEST_URL });

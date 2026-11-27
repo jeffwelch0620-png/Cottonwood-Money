@@ -68,16 +68,18 @@ declare
   v_max    int;
   i        int;
 begin
-  -- Row lock first: a concurrent calendar change either commits before we read, or waits for us
-  -- (and then sees our periods and is refused by entity_guard).
-  select * into e from public.entity where id = p_entity and tenant_id = app.current_tenant() for update;
-  if not found then
+  -- Lock order (same as posting): the entity's posting lock, then the entity row.
+  -- FOR NO KEY UPDATE serializes with a calendar change (an UPDATE takes the same lock), so the
+  -- change either commits before we read or waits and is then refused by entity_guard; it does
+  -- not conflict with the FOR KEY SHARE that posting's foreign keys take, so it cannot deadlock.
+  if not exists (select 1 from public.entity where id = p_entity and tenant_id = app.current_tenant()) then
     raise exception 'UNKNOWN_ENTITY: entity % is not in your tenant', p_entity;
   end if;
+  perform pg_advisory_xact_lock(hashtextextended('ledger:' || p_entity::text, 0));
+  select * into e from public.entity where id = p_entity for no key update;
   if p_year is null or p_year not between 1900 and 2999 then
     raise exception 'BAD_INPUT: fiscal year must be between 1900 and 2999';
   end if;
-  perform pg_advisory_xact_lock(hashtextextended('ledger:' || p_entity::text, 0));
 
   select min(fiscal_year), max(fiscal_year) into v_min, v_max from public.period where entity_id = p_entity;
   if p_year between v_min and v_max then

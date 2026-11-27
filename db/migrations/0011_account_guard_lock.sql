@@ -25,7 +25,7 @@ begin
   return new;
 end $$;
 
--- Review fix (PR #1): ledger.create_fiscal_year locks the entity row (SELECT ... FOR UPDATE) before
--- reading calendar settings. FOR UPDATE needs UPDATE privilege on at least one column; id is
+-- Review fix (PR #1): ledger.create_fiscal_year locks the entity row (FOR NO KEY UPDATE) before
+-- reading calendar settings. Row locks need UPDATE privilege on at least one column; id is
 -- immutable (entity_guard), so this grants the lock and nothing else.
 grant update (id) on entity to ledger_owner;

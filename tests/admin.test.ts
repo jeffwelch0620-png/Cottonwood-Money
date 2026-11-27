@@ -2,7 +2,7 @@
 // last-owner rule, audited role/limit/setup changes, COA template, JE viewer, audit export.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
-import { appClient, superClient, makeFixture, dsj, post, actAs, authOf, expectCode, TEST_URL, type Fixture } from './helpers.js';
+import { appClient, superClient, makeFixture, dsj, post, actAs, authOf, expectCode, waitUntilBlocked, TEST_URL, type Fixture } from './helpers.js';
 
 let db: pg.Client;
 let su: pg.Client;
@@ -124,9 +124,10 @@ describe('membership: last owner and audited changes', () => {
       await c1.query('begin');
       await c2.query('begin');
       await c1.query(`update membership set role = 'controller' where user_id = $1`, [authOf(fx.user2)]);
+      const c2Pid = (await c2.query('select pg_backend_pid() p')).rows[0].p;
       const second = c2.query(`update membership set role = 'controller' where user_id = $1`, [authOf(fx.user1)])
         .then(() => 'ok', (e) => e.message.split(':')[0]);
-      await new Promise((r) => setTimeout(r, 100)); // c2 is now waiting on the owners lock
+      await waitUntilBlocked(c2Pid); // c2 is now waiting on the owners lock
       await c1.query('commit');
       expect(await second).toBe('LAST_OWNER');
       await c2.query('rollback');
