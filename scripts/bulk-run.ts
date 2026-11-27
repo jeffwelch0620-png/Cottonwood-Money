@@ -211,7 +211,15 @@ const ents = await setup();
 log(`setup: ${TENANTS} tenants × ${ENTITIES_PER_TENANT} entities, posting ${N.toLocaleString()} entries with ${ents.length} workers`);
 const stats: Stats = { posted: 0, refused: 0, applied: 0, byType: { sales: 0, bills: 0, payments: 0, payroll: 0 }, wrong: [] };
 const quota = Math.ceil(N / ents.length);
-const tick = setInterval(() => log(`posted ${stats.posted.toLocaleString()} (${Math.round(stats.posted / ((Date.now() - tPost) / 1000))}/s), refused ${stats.refused}, problems ${stats.wrong.length}`), 30_000);
+// Rate per 30 s window: flat = posting cost doesn't grow with data size.
+const windows: { at: number; rate: number }[] = [];
+let lastPosted = 0;
+const tick = setInterval(() => {
+  const rate = Math.round((stats.posted - lastPosted) / 30);
+  lastPosted = stats.posted;
+  windows.push({ at: stats.posted, rate });
+  log(`posted ${stats.posted.toLocaleString()} (window ${rate}/s, avg ${Math.round(stats.posted / ((Date.now() - tPost) / 1000))}/s), refused ${stats.refused}, problems ${stats.wrong.length}`);
+}, 30_000);
 const tPost = Date.now();
 await Promise.all(ents.map((e, i) => worker(e, quota, 1000 + i, stats)));
 clearInterval(tick);
@@ -235,6 +243,7 @@ and audit chain verifies, the cash view balances on every date, and the cash/acc
 | Unexpected outcomes | ${stats.wrong.length}${stats.wrong.length ? ': ' + stats.wrong.slice(0, 5).join('; ') : ''} |
 | Posting time | ${postSecs.toFixed(0)} s (${Math.round(stats.posted / postSecs).toLocaleString()} entries/s across ${ents.length} entities) |
 | Database size | ${v.size} |
+| Posting rate, first vs last 30 s window | ${windows.length > 2 ? `${windows.at(1)!.rate}/s at ${windows.at(1)!.at.toLocaleString()} entries → ${windows.at(-1)!.rate}/s at ${windows.at(-1)!.at.toLocaleString()}` : 'run too short to measure'} |
 
 ## Per entity
 

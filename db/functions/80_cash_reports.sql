@@ -18,14 +18,18 @@
 set role ledger_owner;
 
 -- p_entry limits the work to one entry (apply_payment); null = the whole entity (cash_lines).
+-- One query text, two WHERE clauses: "entry_id = p_entry OR p_entry IS NULL" would hide the
+-- entry_id index from the planner and make every payment application scan the entity.
 drop function if exists ledger._entry_shape(uuid);
 create or replace function ledger._entry_shape(p_entity uuid, p_entry uuid default null)
 returns table (entry_id uuid, s numeric, a numeric, f numeric, r numeric, g numeric, alpha numeric, is_doc boolean)
-language sql stable security definer set search_path = pg_catalog, public, pg_temp as $$
+language plpgsql stable security definer set search_path = pg_catalog, public, pg_temp as $$
+begin
+  return query execute format($q$
   with l as (
     select jl.entry_id, jl.debit - jl.credit amt, ac.cash_view cv
       from ledger.journal_line jl join public.account ac on ac.id = jl.account_id
-     where jl.entity_id = p_entity and (p_entry is null or jl.entry_id = p_entry)),
+     where %s),
   s as (
     select l.entry_id, coalesce(sum(l.amt) filter (where l.cv = 'settle'), 0) s from l group by l.entry_id),
   t as (
@@ -40,7 +44,9 @@ language sql stable security definer set search_path = pg_catalog, public, pg_te
   select u.entry_id, u.s, u.a, u.f, u.r, u.g, u.alpha,
          coalesce(u.s <> 0 and u.f <> 0 and u.alpha >= 0 and u.alpha < 1, false)
     from u
-$$;
+  $q$, case when p_entry is null then 'jl.entity_id = $1' else 'jl.entry_id = $2 and jl.entity_id = $1' end)
+  using p_entity, p_entry;
+end $$;
 
 -- Lines of the session's tenant visible to the caller (location scope), on either basis.
 create or replace function ledger.cash_lines(p_entity uuid)
