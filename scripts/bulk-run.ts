@@ -1,6 +1,9 @@
 // Exit-gate run (Build Spec §1): N random entries across several entities, then prove the books.
-//   DATABASE_URL=<superuser url> BULK_N=1000000 npx tsx scripts/bulk-run.ts
-// Creates a fresh database (BULK_DB, default ledger_bulk), posts through the same functions the app
+//   PG_BASE_URL=postgres://postgres:postgres@localhost:5432 BULK_N=1000000 npx tsx scripts/bulk-run.ts
+// PG_BASE_URL = a superuser connection to the server, without a database name (default: local).
+// DESTRUCTIVE: drops and recreates BULK_DB (default ledger_bulk) on that server. The name must start
+// with "ledger_bulk", so it can never point at a real database.
+// Creates a fresh database, posts through the same functions the app
 // uses (as each tenant's Toast integration, via session claims), then checks per entity:
 //   trial balance nets to 0.0000 · hash chain verifies · cash view balances on every date ·
 //   cash/accrual tie-out difference 0.0000 · audit chain verifies — and times the reports.
@@ -19,6 +22,11 @@ const TENANTS = Number(process.env.BULK_TENANTS ?? 2);
 const ENTITIES_PER_TENANT = Number(process.env.BULK_ENTITIES ?? 5);
 const REPORT = process.env.BULK_REPORT ?? 'docs/exit-gate/1m-run.md';
 const URL_ = `${BASE}/${DB}`;
+for (const [name, v] of Object.entries({ BULK_N: N, BULK_TENANTS: TENANTS, BULK_ENTITIES: ENTITIES_PER_TENANT })) {
+  if (!Number.isInteger(v) || v < 1) throw new Error(`${name} must be a positive whole number (got ${v})`);
+}
+if (!/^ledger_bulk[a-z0-9_]*$/.test(DB)) throw new Error(`BULK_DB must start with "ledger_bulk" (got ${DB}); this script drops it`);
+console.log(`Target: ${BASE.replace(/\/\/[^@]*@/, '//***@')}/${DB} (dropped and recreated)`);
 const t0 = Date.now();
 const log = (m: string) => console.log(`[${((Date.now() - t0) / 1000).toFixed(0).padStart(5)}s] ${m}`);
 
@@ -226,7 +234,10 @@ clearInterval(tick);
 const postSecs = (Date.now() - tPost) / 1000;
 log(`posting done: ${stats.posted.toLocaleString()} in ${postSecs.toFixed(0)}s (${Math.round(stats.posted / postSecs)}/s)`);
 const v = await verifyAndTime(ents);
-const allGood = stats.wrong.length === 0 && v.rows.every((r) => r.tb_zero && String(r.chain).startsWith('ok') && r.cash_dates_unbalanced === 0 && r.tieout_diff === '0.0000') && v.audits.every((a) => a.includes(': ok'));
+const planned = quota * ents.length;
+const counted = v.rows.reduce((a, r) => a + Number(r.entries), 0);
+const allGood = stats.posted === planned && counted === planned && v.rows.length === ents.length && ents.length > 0
+  && stats.wrong.length === 0 && v.rows.every((r) => r.tb_zero && String(r.chain).startsWith('ok') && r.cash_dates_unbalanced === 0 && r.tieout_diff === '0.0000') && v.audits.every((a) => a.includes(': ok'));
 const med = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
 const md = `# Exit-gate run: ${stats.posted.toLocaleString()} entries
 
@@ -237,7 +248,7 @@ and audit chain verifies, the cash view balances on every date, and the cash/acc
 
 | Measure | Value |
 |---|---|
-| Entries posted | ${stats.posted.toLocaleString()} (sales ${stats.byType.sales.toLocaleString()}, bills ${stats.byType.bills.toLocaleString()}, payments ${stats.byType.payments.toLocaleString()}, payroll ${stats.byType.payroll.toLocaleString()}) |
+| Entries posted | ${stats.posted.toLocaleString()} of ${planned.toLocaleString()} planned; ${counted.toLocaleString()} in the database (sales ${stats.byType.sales.toLocaleString()}, bills ${stats.byType.bills.toLocaleString()}, payments ${stats.byType.payments.toLocaleString()}, payroll ${stats.byType.payroll.toLocaleString()}) |
 | Payment applications | ${stats.applied.toLocaleString()} |
 | Unbalanced entries refused | ${stats.refused.toLocaleString()} (all \`UNBALANCED\`) |
 | Unexpected outcomes | ${stats.wrong.length}${stats.wrong.length ? ': ' + stats.wrong.slice(0, 5).join('; ') : ''} |
