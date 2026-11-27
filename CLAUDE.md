@@ -65,9 +65,17 @@ Step 7 done (2026-11-27): migration 0008 + `db/functions/80_cash_reports.sql` +
 reports take basis and echo it; tie-out to the cent. 115/115 tests; ~433 posts/s.
 Pending owner review: unapplied payments stay visible in AP/AR on the cash basis.
 
-## Next: Phase 0 step 8 (weeks 8–10) — admin console
-Tenants and entities, COA editor, periods, manual JE with two-person approval, JE viewer showing
-evidence and hash, audit export. Then steps 9–10 (1M-entry run + CPA review, exit gate).
+Step 7 decision (approved 2026-11-27): unapplied payments stay visible in AP/AR on the cash basis.
+
+Step 8a done (2026-11-27): migrations 0009–0010, `db/functions/85_admin.sql`, `apps/api` (Fastify,
+`npm run api`). Drafts with two-person approval (agents may propose), last-owner rule, audited
+membership/setup changes, USAR-style COA template, JE viewer, audit export, cash_view fixed once
+posted. 133/133 tests; ~430 posts/s. See README "Admin layer".
+
+## Next: Phase 0 step 8b — admin console UI (`apps/admin`, Next.js per Build Spec §3)
+Screens over the 8a API: tenants/entities, COA editor (+ template), periods (close/seal/reopen),
+draft queue with approve/reject, JE list + viewer (evidence, hash checks), reports, audit export.
+Then steps 9–10 (1M-entry run + CPA review, exit gate).
 
 ## Test conventions (step 5+)
 - Every app_role session needs claims: `actAs(db, principalId)` in tests; `withSession()` in app code.
@@ -76,6 +84,8 @@ evidence and hash, audit export. Then steps 9–10 (1M-entry run + CPA review, e
 - Fixtures: FY2026 calendar months for both entities; entity A Jan–Sep hard, Oct soft (`f.monthsA`).
   Periods change only via ledger.close_period / seal_period / reopen functions.
 - Race tests must prove the race happened (both outcomes observed), not just pass.
+- New tenant tables must be seeded in auth-rls.test.ts beforeAll (the isolation guard needs rows).
+- API tests: `buildServer` + `app.inject` with HS256 tokens (tests/api.test.ts `as(fx, principal)`).
 
 ## Working style for this owner
 Logic first, short explanations, show the math in summary form, diagrams welcome.

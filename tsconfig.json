@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["db", "modules", "tests", "vitest.config.ts"]
+  "include": ["apps", "db", "modules", "tests", "vitest.config.ts"]
 }

@@ -11,10 +11,20 @@ export interface SessionClaims {
   [claim: string]: unknown;
 }
 
-export async function withSession<T>(pool: Pool, claims: SessionClaims, fn: (db: PoolClient) => Promise<T>): Promise<T> {
+/** Claims before a tenant is chosen (sign-up, tenant picker). */
+export type PreTenantClaims = Omit<SessionClaims, 'tenant_id'> & { tenant_id?: string };
+
+export async function withSession<T>(
+  pool: Pool,
+  claims: SessionClaims | PreTenantClaims,
+  fn: (db: PoolClient) => Promise<T>,
+  opts: { role?: string } = {},
+): Promise<T> {
   const db = await pool.connect();
   try {
     await db.query('begin');
+    // Act as the restricted application role for this transaction only.
+    if (opts.role) await db.query(`set local role ${quoteIdent(opts.role)}`);
     await db.query(`select set_config('request.jwt.claims', $1, true)`, [JSON.stringify(claims)]);
     const result = await fn(db);
     await db.query('commit');
@@ -25,4 +35,9 @@ export async function withSession<T>(pool: Pool, claims: SessionClaims, fn: (db:
   } finally {
     db.release();
   }
+}
+
+function quoteIdent(s: string) {
+  if (!/^[a-z_][a-z0-9_]*$/.test(s)) throw new Error(`invalid role name: ${s}`);
+  return s;
 }

@@ -3,8 +3,8 @@
 The audit-grade core of the restaurant accounting platform. Weeks 1–6 of the Phase 0
 build spec: schema, posting function, guards, hash chain, verifier (steps 1–4), then
 auth, membership and row-level security (step 5), fiscal calendars and the close
-workflow (step 6), payment application, cash/accrual views and reports (step 7), and the
-tests that prove them.
+workflow (step 6), payment application, cash/accrual views and reports (step 7), the admin
+database layer and API (step 8a), and the tests that prove them.
 
 **Design rule:** the database enforces the books, not the app. The application role
 can only `EXECUTE` the posting functions; it has no INSERT/UPDATE/DELETE on ledger
@@ -18,6 +18,9 @@ npm install
 # Postgres 14+ running locally; superuser postgres/postgres by default
 PG_BASE_URL=postgres://postgres:postgres@localhost:5432 npm test
 npm run typecheck
+
+# API server (Supabase HS256 secret, or SUPABASE_JWKS_URL for asymmetric keys)
+DATABASE_URL=... SUPABASE_JWT_SECRET=... npm run api
 
 # Migrate a real database
 DATABASE_URL=postgres://user:pass@host:5432/db npm run migrate
@@ -36,16 +39,19 @@ db/migrations/   0000 roles · 0001 tenancy/COA/periods · 0002 evidence/audit �
                  0005 auth shim/membership/principal login · 0006 balance backstop runs as owner
                  0007 fiscal calendar settings, period position, reopen requests
                  0008 payment_application, AR source types
+                 0009 JE drafts, last-owner rule, setup audit trail · 0010 cash_view fixed once posted
 db/functions/    session identity (app.*) · audit chain · canonical form + hash · post_entry ·
                  reverse/intercompany · verify/manifest/seal · periods/close/reopen ·
-                 cash view + reports + payment application · RLS policies · grants
+                 cash view + reports + payment application · admin (drafts, COA template,
+                 JE viewer, audit export) · RLS policies · grants
+apps/api/        Fastify server: Supabase JWT → withSession(app_role) → database functions
 db/migrate.ts    migration runner (numbered files once; functions re-applied every run)
 modules/shared/  money (Decimal, never JS numbers)
 modules/ledger/  TypeScript entry points + typed LedgerError codes
 modules/auth/    withSession(): verified JWT claims set per transaction
 modules/reporting/ trialBalance · profitAndLoss · balanceSheet · cashAccrualTieOut (Decimal totals)
 tests/           invariants · immutability · idempotency/concurrency · tamper · property · module · auth-rls ·
-                 periods · cash-accrual
+                 periods · cash-accrual · admin · api
 ```
 
 ## What the database enforces
@@ -137,6 +143,26 @@ largest settle line, so a fully settled document re-dates exactly its own amount
   cash is applied (then it is exactly the spec formula) and otherwise the unapplied-cash movement.
 - Location-scoped users get their store's lines, weighted from the whole document.
 
+## Admin layer (step 8a)
+
+```
+propose_entry (any member but viewers; agents too) → je_draft (pending, immutable)
+      └─ approve_draft by a different person ─→ ledger._post (every rule re-checked) → posted
+      └─ reject_draft (reviewer with a reason, or the proposer withdrawing)
+membership change → audit event {field: {from, to}}; last active owner can't be demoted (LAST_OWNER)
+entity / location / account / principal insert or update → audit event with actor and diff
+```
+- `ledger.load_coa_template('usar')`: 62-account USAR-style restaurant chart with cash_view set per
+  account; adds only unused numbers. Input to the CPA review.
+- `ledger.entry_detail(entry)`: lines, evidence with sha256, creator/approver, `hash_ok` (recomputed
+  via entry_hash) and `link_ok` (previous entry's hash), reversal links, draft, applications.
+- `audit.export(from, to)`: owner/controller; events with actor names plus full-chain verification.
+  The API serves JSONL or CSV with `x-audit-chain-ok` and `x-export-sha256` headers.
+- `account.cash_view` is fixed once an account has postings (it would rewrite cash-basis history).
+- API: `/v1/me`, tenants, entities, locations, members, accounts, COA template, periods + fiscal years +
+  close/seal/reopen, drafts, entries (list, viewer, post, reverse), payment applications, source
+  documents, reports, chain verify, audit export. Error codes map to 400/401/403/404/409/422.
+
 Roles: `owner` (members/principals + everything a controller can do) · `controller` (COA, periods, soft-close posting, seal) ·
 `bookkeeper` / `manager` (post and approve within scope and limit) · `viewer` (read) ·
 `service` (machine login for an agent or integration principal; no MFA, never approves).
@@ -147,7 +173,10 @@ are mapped to `LedgerError.code` in TypeScript.
 
 ## Test results (this build)
 
-- 115 / 115 tests pass on a fresh database; TypeScript type check clean.
+- 133 / 133 tests pass on a fresh database; TypeScript type check clean.
+- Step 8a: the full admin journey (sign-up → COA template → 4-4-5 entity → member → two-person manual
+  JE → reports → close → two-person reopen → audit export) runs through HTTP in one test. Mutation
+  check: removing the last-owner lock lets two owners demote each other (test fails).
 - Cash property run: 600 random documents (bills, COD, payroll, invoices with tax, credit memos),
   885 applications, 441 undone, 313 over-applications refused; every cash-view date balances, tie-out
   difference 0.0000 for each month and both together, TB and balance sheet balance on both bases.
@@ -171,7 +200,6 @@ are mapped to `LedgerError.code` in TypeScript.
 | Supabase deploy not yet tried | Local shim stands in for `auth.users` / `auth.uid()` / `auth.jwt()`; need to confirm grants on `auth` to `ledger_owner` and the custom-claims hook that adds `tenant_id` | Before first staging deploy |
 | Manifest worker needs a tenant session | `verify_chain` / `take_manifest` now check the session tenant | Run the nightly worker as a per-tenant `service` member, or add a maintenance role |
 | Journal entry headers aren't location-scoped | Lines are filtered by `location_ids`; headers (memo) are tenant-wide | Phase 0 step 8 (admin console) if needed |
-| Last-owner protection | An owner can deactivate the only owner membership | Step 8 |
 | Changing an entity's calendar | Settings are fixed once periods exist; switching at a year boundary needs a conversion workflow | When a customer asks |
 | Cash view is computed per request | Fine at Phase 0 volumes; spec calls for materialized balances refreshed on post | Week 10–11 tuning (1M run) |
 | Applications into closed periods | A prepaid or deposit applied after its payment's period closed is refused | CPA review (week 10–11) |
