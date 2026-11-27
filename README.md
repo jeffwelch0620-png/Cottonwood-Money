@@ -209,6 +209,11 @@ Tenants are created only by `app.create_tenant()` (sign-up), which makes the cal
 Errors come back as `CODE: detail` (`UNBALANCED`, `PERIOD_CLOSED`, `SELF_APPROVAL`, …) and
 are mapped to `LedgerError.code` in TypeScript.
 
+## Exit gate
+
+Phase 0 exit-gate review: [`docs/exit-gate/README.md`](docs/exit-gate/README.md). Five of six
+conditions met; the CPA review is provisionally approved by the owner, with the formal review outstanding.
+
 ## Test results (this build)
 
 - **Exit-gate run: 1,000,000 entries, PASS** (`docs/exit-gate/1m-run.md`): 10 entities × 100,000

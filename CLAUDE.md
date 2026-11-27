@@ -81,11 +81,17 @@ console build, browser e2e). 1M-entry exit-gate run PASS (`docs/exit-gate/1m-run
 `scripts/bulk-run.ts`). Tuning found by the runs: per-entry shape in apply_payment (index-friendly),
 procedural basis_lines, report scope computed once (MATERIALIZED CTE), journal_line entity index
 (0013). CPA review packet drafted (Claude Doc "Restaurant Ledger — CPA Review Packet"), awaiting a CPA.
-Stored (materialized) balances deferred pending owner decision: cash reports ~2.2 s at 100k entries
-per entity.
+Step 9 decision (approved 2026-11-27): stored (materialized) balances deferred to Phase 1, to be
+built if real volumes need them (measured: cash reports ~2.2 s, accrual < 1 s at 100k entries per
+entity).
 
-## Next: Phase 0 step 10 — exit-gate review (Build Spec §1)
-Remaining gate item: CPA sign-off on the COA template, close rules and reversal policy.
+Step 10 (2026-11-27): exit-gate review in `docs/exit-gate/README.md`. Gate items 1–5 met; item 6
+(CPA review) provisionally approved by the owner, formal CPA review outstanding — when a CPA
+responds, follow "Closing condition 6" in that file. Phase 0 is complete on that basis.
+
+## Next: Phase 1 (Build Spec §10, after the exit gate)
+Toast daily sales, bank feeds, AP, inventory counts. Read the Product Spec's Phase 1 section first;
+plan the step breakdown with the owner before building.
 
 ## Test conventions (step 5+)
 - Every app_role session needs claims: `actAs(db, principalId)` in tests; `withSession()` in app code.
