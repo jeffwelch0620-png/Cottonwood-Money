@@ -90,7 +90,7 @@ begin
   end if;
 
   -- 3. Source type and intercompany routing -------------------------------------------
-  if v_src not in ('pos_dsj','ap_bill','ap_payment','bank','payroll','inventory',
+  if v_src not in ('pos_dsj','ap_bill','ap_payment','ar_invoice','ar_receipt','bank','payroll','inventory',
                    'manual','reversal','intercompany','opening') then
     raise exception 'BAD_SOURCE_TYPE: %', v_src;
   end if;

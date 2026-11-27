@@ -3,7 +3,8 @@
 The audit-grade core of the restaurant accounting platform. Weeks 1–6 of the Phase 0
 build spec: schema, posting function, guards, hash chain, verifier (steps 1–4), then
 auth, membership and row-level security (step 5), fiscal calendars and the close
-workflow (step 6), and the tests that prove them.
+workflow (step 6), payment application, cash/accrual views and reports (step 7), and the
+tests that prove them.
 
 **Design rule:** the database enforces the books, not the app. The application role
 can only `EXECUTE` the posting functions; it has no INSERT/UPDATE/DELETE on ledger
@@ -34,13 +35,17 @@ proven against an empty database each time.
 db/migrations/   0000 roles · 0001 tenancy/COA/periods · 0002 evidence/audit · 0003 ledger · 0004 guards
                  0005 auth shim/membership/principal login · 0006 balance backstop runs as owner
                  0007 fiscal calendar settings, period position, reopen requests
+                 0008 payment_application, AR source types
 db/functions/    session identity (app.*) · audit chain · canonical form + hash · post_entry ·
-                 reverse/intercompany · verify/manifest/seal · periods/close/reopen · RLS policies · grants
+                 reverse/intercompany · verify/manifest/seal · periods/close/reopen ·
+                 cash view + reports + payment application · RLS policies · grants
 db/migrate.ts    migration runner (numbered files once; functions re-applied every run)
 modules/shared/  money (Decimal, never JS numbers)
 modules/ledger/  TypeScript entry points + typed LedgerError codes
 modules/auth/    withSession(): verified JWT claims set per transaction
-tests/           invariants · immutability · idempotency/concurrency · tamper · property · module · auth-rls · periods
+modules/reporting/ trialBalance · profitAndLoss · balanceSheet · cashAccrualTieOut (Decimal totals)
+tests/           invariants · immutability · idempotency/concurrency · tamper · property · module · auth-rls ·
+                 periods · cash-accrual
 ```
 
 ## What the database enforces
@@ -98,6 +103,40 @@ Status   open → soft → hard → sealed,  and always: earlier period ≥ late
 Periods are written only by these functions (owner/controller, person). Direct period INSERT/UPDATE
 is revoked from the app; backward moves are refused by trigger unless made inside an approved reopen.
 
+## Cash/accrual views and reports (step 7)
+
+```
+Per entry (debit-positive):  S = settle lines, A = always lines,
+  F = never lines funding S (sign opposite S), R = other never lines (e.g. sales tax payable)
+  S + A + F + R = 0      G = A + F      α = A / G
+  document ⇔ S ≠ 0, F ≠ 0, 0 ≤ α < 1
+  entry date         A × 1,   S,R × α                       (A − α·G = 0)
+  each settlement x  S,R × x/|G|,   F × x/|F|               (−x + x = 0)
+  non-documents (sales, payments, depreciation): every line on its entry date
+```
+Every date balances by construction; rounding is cumulative per line with the residual on the
+largest settle line, so a fully settled document re-dates exactly its own amounts.
+
+| Document | Cash view |
+|---|---|
+| Bill 1,000 paid 600 + 400 | COGS 600 / 400 on the payment dates (spec example) |
+| COD bill: 100 cash + 900 AP | 100 on the bill date, 900 on payment |
+| Payroll: 700 net + 300 tax payable | 700 on payday, 300 when remitted |
+| Invoice 1,000 + 80 tax → AR 1,080 | on receipt: sales 1,000 and tax liability 80 |
+| Payment with discount (bank 980, discount 20) | not a document; settles the bill in full |
+| Credit memo applied to a bill | nets to zero |
+| Unapplied payment | stays in AP/AR on the cash basis (so the cash TB balances) |
+
+- `ledger.apply_payment(payment, document, amount)` / `unapply_payment(application)`: insert-only;
+  `settled_on` = the payment's date (derived); its period must be open (soft: owner/controller
+  override); refuses over-application of the document or the payment, non-documents, non-payments,
+  cross-entity links; agents and viewers refused; audit event per application.
+- Reports (basis = accrual | cash, default the entity's, echoed on every row): `trial_balance`,
+  `profit_and_loss` (optional location), `balance_sheet` (prior-year and current-year earnings lines),
+  `cash_accrual_tieout`: NI_cash = NI_accrual − ΔWC_accrual + ΔWC_cash, where ΔWC_cash is zero when all
+  cash is applied (then it is exactly the spec formula) and otherwise the unapplied-cash movement.
+- Location-scoped users get their store's lines, weighted from the whole document.
+
 Roles: `owner` (members/principals + everything a controller can do) · `controller` (COA, periods, soft-close posting, seal) ·
 `bookkeeper` / `manager` (post and approve within scope and limit) · `viewer` (read) ·
 `service` (machine login for an agent or integration principal; no MFA, never approves).
@@ -108,7 +147,11 @@ are mapped to `LedgerError.code` in TypeScript.
 
 ## Test results (this build)
 
-- 96 / 96 tests pass on a fresh database; TypeScript type check clean.
+- 115 / 115 tests pass on a fresh database; TypeScript type check clean.
+- Cash property run: 600 random documents (bills, COD, payroll, invoices with tax, credit memos),
+  885 applications, 441 undone, 313 over-applications refused; every cash-view date balances, tie-out
+  difference 0.0000 for each month and both together, TB and balance sheet balance on both bases.
+  Mutation checks: removing the rounding plug or using the wrong weight both fail the run.
 - Period suite: calendars checked for every week-based setting over 2000–2060 (336 settings × 61 years:
   all 364/371 days, all end on the week-end day, 53-week years every 5–6 years); close-vs-post race
   verified, and shown to fail if the close lock is removed.
@@ -130,6 +173,9 @@ are mapped to `LedgerError.code` in TypeScript.
 | Journal entry headers aren't location-scoped | Lines are filtered by `location_ids`; headers (memo) are tenant-wide | Phase 0 step 8 (admin console) if needed |
 | Last-owner protection | An owner can deactivate the only owner membership | Step 8 |
 | Changing an entity's calendar | Settings are fixed once periods exist; switching at a year boundary needs a conversion workflow | When a customer asks |
+| Cash view is computed per request | Fine at Phase 0 volumes; spec calls for materialized balances refreshed on post | Week 10–11 tuning (1M run) |
+| Applications into closed periods | A prepaid or deposit applied after its payment's period closed is refused | CPA review (week 10–11) |
+| Applications aren't hash-chained | Each is in the hash-chained audit log; the verifier doesn't cross-check them yet | With the manifest worker |
 | Sealing doesn't anchor externally | Seal hash is stored; optional external timestamp anchor (Product Spec) not built | With the manifest export worker |
 | Manifest is stored in the DB only | Export to write-once storage + owner email is a worker job | Weeks 4–5 follow-up |
 | Audit chain serializes all postings in a tenant | Fine at restaurant volumes (~400/s measured per entity) | Revisit if a tenant exceeds it |

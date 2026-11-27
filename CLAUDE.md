@@ -57,10 +57,17 @@ generated per entity (calendar month / 4-4-5 / 13-period, 52/53-week rule neares
 close is forward-only and in date order; two-person reopen, never for sealed periods.
 96/96 tests pass; ~419 posts/s. See README "Fiscal calendars and close".
 
-## Next: Phase 0 step 7 (weeks 7–8)
-payment_application, cash/accrual views, trial balance, P&L and balance sheet API;
-cash/accrual suite green. Then steps 8–10 per Build Spec §10 (admin console, 1M-entry run +
-CPA review, exit gate).
+Step 6 decisions (approved 2026-11-27): 52/53-week rule defaults to "nearest"; close order
+strict (reopen later periods first).
+
+Step 7 done (2026-11-27): migration 0008 + `db/functions/80_cash_reports.sql` +
+`modules/reporting`. Cash view per spec §7 with the document math in README "Cash/accrual views";
+reports take basis and echo it; tie-out to the cent. 115/115 tests; ~433 posts/s.
+Pending owner review: unapplied payments stay visible in AP/AR on the cash basis.
+
+## Next: Phase 0 step 8 (weeks 8–10) — admin console
+Tenants and entities, COA editor, periods, manual JE with two-person approval, JE viewer showing
+evidence and hash, audit export. Then steps 9–10 (1M-entry run + CPA review, exit gate).
 
 ## Test conventions (step 5+)
 - Every app_role session needs claims: `actAs(db, principalId)` in tests; `withSession()` in app code.

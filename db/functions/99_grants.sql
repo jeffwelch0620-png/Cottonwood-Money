@@ -15,6 +15,14 @@ grant execute on function ledger.close_period(uuid, text)         to app_role;
 grant execute on function ledger.request_reopen(uuid, text, text) to app_role;
 grant execute on function ledger.approve_reopen(uuid)             to app_role;
 grant execute on function ledger.reject_reopen(uuid)              to app_role;
+grant execute on function ledger.apply_payment(uuid, uuid, numeric, boolean) to app_role;
+grant execute on function ledger.unapply_payment(uuid, boolean)              to app_role;
+grant execute on function ledger.cash_lines(uuid)                            to app_role;
+grant execute on function ledger.accrual_lines(uuid)                         to app_role;
+grant execute on function ledger.trial_balance(uuid, date, date, text)       to app_role;
+grant execute on function ledger.profit_and_loss(uuid, date, date, text, uuid) to app_role;
+grant execute on function ledger.balance_sheet(uuid, date, text)             to app_role;
+grant execute on function ledger.cash_accrual_tieout(uuid, date, date)       to app_role;
 grant execute on function audit.verify_chain(uuid)          to app_role;
 -- Pure helper; lets external tools recompute chain starts.
 grant execute on function ledger.genesis_hash(uuid)         to app_role;

@@ -31,6 +31,15 @@ beforeAll(async () => {
   await db.query('select ledger.take_manifest($1)', [a.entityA]);
   await actAs(db, a.user1);
   await db.query(`select ledger.request_reopen($1, 'soft', 'isolation fixture')`, [a.periods.sepA]);
+  const bill = await post(db, dsj(a, { source_type: 'ap_bill', lines: [
+    { account_id: a.acct.cogs, location_id: a.locA1, debit: '100' },
+    { account_id: a.acct.ap, location_id: a.locA1, credit: '100' },
+  ] }));
+  const pay = await post(db, dsj(a, { source_type: 'ap_payment', lines: [
+    { account_id: a.acct.ap, location_id: a.locA1, debit: '100' },
+    { account_id: a.acct.cash, location_id: a.locA1, credit: '100' },
+  ] }));
+  await db.query('select ledger.apply_payment($1, $2, 100)', [pay.id, bill.id]);
   await post(db, dsj(b));
 });
 afterAll(async () => {

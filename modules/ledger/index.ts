@@ -27,7 +27,7 @@ export const PostEntrySchema = z
     tenant_id: uuid,
     entity_id: uuid,
     entry_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    source_type: z.enum(['pos_dsj', 'ap_bill', 'ap_payment', 'bank', 'payroll', 'inventory', 'manual', 'opening']),
+    source_type: z.enum(['pos_dsj', 'ap_bill', 'ap_payment', 'ar_invoice', 'ar_receipt', 'bank', 'payroll', 'inventory', 'manual', 'opening']),
     idempotency_key: z.string().min(1),
     memo: z.string().optional(),
     actor_type: z.enum(['user', 'agent', 'integration']),
@@ -113,4 +113,24 @@ export async function trialBalance(db: ClientBase, entityId: string) {
     [entityId],
   );
   return rows as { number: string; name: string; debit: string; credit: string }[];
+}
+
+/** Links a payment (or credit memo) to the document it settles. settled_on = the payment's date. */
+export async function applyPayment(db: ClientBase, paymentId: string, documentId: string, amount: string, allowSoftClose = false) {
+  try {
+    const { rows } = await db.query('select ledger.apply_payment($1, $2, $3::numeric, $4) as r', [paymentId, documentId, amount, allowSoftClose]);
+    return rows[0].r as { id: string; settled_on: string; amount: string; document_open: string };
+  } catch (err) {
+    throw toLedgerError(err);
+  }
+}
+
+/** Undoes an application with a negative row at the original settlement date. */
+export async function unapplyPayment(db: ClientBase, applicationId: string, allowSoftClose = false) {
+  try {
+    const { rows } = await db.query('select ledger.unapply_payment($1, $2) as r', [applicationId, allowSoftClose]);
+    return rows[0].r as { id: string; reverses_id: string };
+  } catch (err) {
+    throw toLedgerError(err);
+  }
 }
