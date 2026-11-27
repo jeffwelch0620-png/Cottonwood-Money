@@ -17,13 +17,15 @@
 -- therefore re-dates exactly its own amounts.
 set role ledger_owner;
 
-create or replace function ledger._entry_shape(p_entity uuid)
+-- p_entry limits the work to one entry (apply_payment); null = the whole entity (cash_lines).
+drop function if exists ledger._entry_shape(uuid);
+create or replace function ledger._entry_shape(p_entity uuid, p_entry uuid default null)
 returns table (entry_id uuid, s numeric, a numeric, f numeric, r numeric, g numeric, alpha numeric, is_doc boolean)
 language sql stable security definer set search_path = pg_catalog, public, pg_temp as $$
   with l as (
     select jl.entry_id, jl.debit - jl.credit amt, ac.cash_view cv
       from ledger.journal_line jl join public.account ac on ac.id = jl.account_id
-     where jl.entity_id = p_entity),
+     where jl.entity_id = p_entity and (p_entry is null or jl.entry_id = p_entry)),
   s as (
     select l.entry_id, coalesce(sum(l.amt) filter (where l.cv = 'settle'), 0) s from l group by l.entry_id),
   t as (
@@ -113,13 +115,19 @@ language sql stable security definer set search_path = pg_catalog, public, pg_te
      and (app.allowed_locations() is null or jl.location_id = any(app.allowed_locations()))
 $$;
 
+-- Chooses one source: the planner cannot skip a SECURITY DEFINER function inside a UNION, so a
+-- UNION here made every accrual report compute the whole cash view too.
+drop function if exists ledger.basis_lines(uuid, text);
 create or replace function ledger.basis_lines(p_entity uuid, p_basis text)
 returns table (entry_id uuid, line_id uuid, account_id uuid, location_id uuid, view_date date, amount numeric)
-language sql stable security definer set search_path = pg_catalog, public, pg_temp as $$
-  select * from ledger.cash_lines(p_entity) where p_basis = 'cash'
-  union all
-  select * from ledger.accrual_lines(p_entity) where p_basis = 'accrual'
-$$;
+language plpgsql stable security definer set search_path = pg_catalog, public, pg_temp as $$
+begin
+  if p_basis = 'cash' then
+    return query select * from ledger.cash_lines(p_entity);
+  else
+    return query select * from ledger.accrual_lines(p_entity);
+  end if;
+end $$;
 
 -- Checks the entity is in the session's tenant and resolves the basis (default: entity's).
 create or replace function ledger._report_basis(p_entity uuid, p_basis text) returns text
@@ -345,7 +353,7 @@ begin
     raise exception 'ENTRY_REVERSED: reversed entries and reversals cannot be applied';
   end if;
 
-  select * into sh from ledger._entry_shape(doc.entity_id) x where x.entry_id = doc.id;
+  select * into sh from ledger._entry_shape(doc.entity_id, doc.id);
   if not sh.is_doc then
     raise exception 'NOT_A_DOCUMENT: entry % has no open AR/AP balance to settle', doc.seq;
   end if;
