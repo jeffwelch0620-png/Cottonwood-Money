@@ -40,6 +40,8 @@ beforeAll(async () => {
     { account_id: a.acct.cash, location_id: a.locA1, credit: '100' },
   ] }));
   await db.query('select ledger.apply_payment($1, $2, 100)', [pay.id, bill.id]);
+  await actAs(db, a.agent);
+  await db.query('select ledger.propose_entry($1::jsonb)', [JSON.stringify(dsj(a, { source_type: 'ap_bill', created_by: undefined, actor_type: undefined }))]);
   await post(db, dsj(b));
 });
 afterAll(async () => {

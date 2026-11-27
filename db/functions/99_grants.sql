@@ -23,6 +23,12 @@ grant execute on function ledger.trial_balance(uuid, date, date, text)       to 
 grant execute on function ledger.profit_and_loss(uuid, date, date, text, uuid) to app_role;
 grant execute on function ledger.balance_sheet(uuid, date, text)             to app_role;
 grant execute on function ledger.cash_accrual_tieout(uuid, date, date)       to app_role;
+grant execute on function ledger.propose_entry(jsonb)                        to app_role;
+grant execute on function ledger.approve_draft(uuid, boolean)                to app_role;
+grant execute on function ledger.reject_draft(uuid, text)                    to app_role;
+grant execute on function ledger.load_coa_template(text)                     to app_role;
+grant execute on function ledger.entry_detail(uuid)                          to app_role;
+grant execute on function audit.export(timestamptz, timestamptz)             to app_role;
 grant execute on function audit.verify_chain(uuid)          to app_role;
 -- Pure helper; lets external tools recompute chain starts.
 grant execute on function ledger.genesis_hash(uuid)         to app_role;
