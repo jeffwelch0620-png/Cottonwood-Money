@@ -233,8 +233,9 @@ are mapped to `LedgerError.code` in TypeScript.
 | Rule | How the database (or S3) enforces it |
 |---|---|
 | A re-run posts nothing twice | Deterministic idempotency key per item; `post_entry` returns the original. Same bytes → same SHA-256 → same source document. One *running* run per (connector, scope): partial unique index → `SYNC_RUNNING`; a run whose lease passed becomes `abandoned` |
-| Evidence can't be overwritten or deleted early | `evidence_object` insert-only (trigger, even for the owner); `register_evidence` refuses a lock shorter than 7 years (`RETENTION_TOO_SHORT`). Bytes: S3 COMPLIANCE-mode Object Lock (no one can shorten it), `If-None-Match: *`, S3-verified SHA-256; content-addressed keys `<tenant>/<sha256>` |
+| Evidence can't be overwritten or deleted early | `evidence_object` insert-only (trigger, even for the owner); `register_evidence` refuses a lock shorter than 7 years (`RETENTION_TOO_SHORT`). Bytes: S3 COMPLIANCE-mode Object Lock (no one can shorten it), `If-None-Match: *`, S3-verified SHA-256; content-addressed keys `<tenant>/<sha256>`. An object already present (e.g. its record rolled back) has its lock extended to the new date before the database records it |
 | app_role can't read secrets | No SELECT grant + deny-all RLS on `connector_secret`; `read_secret` executes only as `worker_role`, only for the job the caller holds (`LEASE_LOST` otherwise). Stored value is AES-256-GCM ciphertext (`NOT_ENCRYPTED` refuses anything else), connector id bound as AAD. Config keys that look like credentials → `SECRET_IN_CONFIG` |
+| Long jobs keep their lease | The worker renews the lease every third of its length while the handler runs; if renewal fails (another worker took over), `asTenant` refuses new work and the result is dropped (`lease_lost`) |
 | Failed job retries, then stops | Each attempt is a row in the insert-only `job_attempt` (outcome + error). 5 attempts by default, then `dead` with `last_error`. A worker that goes silent loses its lease; the lapse is a recorded `lease_expired` attempt and its late result is refused |
 | Integrations follow ledger rules | The worker posts as the connector's `run_as` integration principal (active `service` login, checked at create) through `post_entry`, so every ledger rule applies |
 
@@ -259,8 +260,8 @@ conditions met; the CPA review is provisionally approved by the owner, with the 
   balanced on every date, tie-out difference 0.0000. Posting 858 entries/s across 10 entities.
 - CI on every pull request: ledger tests on Postgres 16, type checks, console build, browser e2e.
 
-- 175 / 175 tests pass on a fresh database; TypeScript type check clean.
-- Step 1.1: 25 integration tests (re-sync posts nothing twice; evidence insert-only and 7-year floor;
+- 179 / 179 tests pass on a fresh database; TypeScript type check clean.
+- Step 1.1: 29 integration tests (re-sync posts nothing twice; evidence insert-only and 7-year floor;
   WORM store and S3 request shape; secrets unreadable by every app login; retries → dead with each
   attempt's error; lease expiry; 4 parallel workers × 12 jobs, each run exactly once; manifest export
   detects a tampered chain). The RLS guard now covers the `integration` schema.

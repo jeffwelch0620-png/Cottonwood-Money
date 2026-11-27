@@ -30,8 +30,10 @@ export interface JobContext {
   asTenant<T>(fn: (db: PoolClient) => Promise<T>): Promise<T>;
   /** The connector's decrypted credential, or null if none is set. */
   secret(): Promise<string | null>;
-  /** Extends the lease (call during long work). */
+  /** Extends the lease now (the worker also renews it automatically while the handler runs). */
   heartbeat(): Promise<void>;
+  /** Aborted when the lease is lost; asTenant refuses to start new work after that. */
+  signal: AbortSignal;
 }
 
 export type Handler = (ctx: JobContext) => Promise<Record<string, unknown> | void>;
@@ -45,12 +47,16 @@ export interface WorkerOptions {
   leaseSeconds?: number;
   /** Override the database's backoff (seconds until the retry); tests use 0. */
   retryInSeconds?: (attempt: number) => number | undefined;
+  /** How often the lease is renewed while a handler runs (default: a third of the lease). */
+  heartbeatMs?: number;
 }
 
 export type RunOutcome =
   | { outcome: 'idle' }
   | { outcome: 'succeeded'; jobId: string; result: Record<string, unknown> }
-  | { outcome: 'failed'; jobId: string; status: 'queued' | 'dead'; error: string };
+  | { outcome: 'failed'; jobId: string; status: 'queued' | 'dead'; error: string }
+  /** Another worker took the job over (our lease lapsed): our result is not recorded. */
+  | { outcome: 'lease_lost'; jobId: string; error: string };
 
 export class Worker {
   constructor(private o: WorkerOptions) {}
@@ -79,13 +85,21 @@ export class Worker {
     });
   }
 
-  context(job: ClaimedJob): JobContext {
+  context(job: ClaimedJob, signal: AbortSignal = new AbortController().signal): JobContext {
     const claims = { sub: job.run_as_auth_user, tenant_id: job.tenant_id, aal: 'aal1' as const, role: 'service' };
+    const live = () => {
+      if (signal.aborted) throw new Error(`LEASE_LOST: job ${job.job_id} is no longer held by ${this.o.workerId}`);
+    };
     return {
       job,
       store: this.o.store,
-      asTenant: (fn) => withSession(this.o.pool, claims, fn, { role: 'app_role' }),
+      signal,
+      asTenant: (fn) => {
+        live();
+        return withSession(this.o.pool, claims, fn, { role: 'app_role' });
+      },
       secret: async () => {
+        live();
         const row = await this.queue(async (db) =>
           (await db.query('select * from integration.read_secret($1, $2)', [job.job_id, this.o.workerId])).rows[0]);
         if (!row) return null;
@@ -98,21 +112,48 @@ export class Worker {
     };
   }
 
-  /** Claims and runs at most one job. */
+  /** Claims and runs at most one job, renewing its lease while the handler runs. */
   async runOnce(): Promise<RunOutcome> {
     const job = await this.claim();
     if (!job) return { outcome: 'idle' };
+    const lease = new AbortController();
+    const ctx = this.context(job, lease.signal);
+    let lostReason = '';
+    const every = this.o.heartbeatMs ?? ((this.o.leaseSeconds ?? 300) * 1000) / 3;
+    const timer = setInterval(() => {
+      ctx.heartbeat().catch((e) => {
+        lostReason = (e as Error).message;
+        lease.abort();
+        clearInterval(timer);
+      });
+    }, every);
     try {
-      const handler = this.o.handlers[job.kind === 'connector_sync' ? `sync:${job.connector_kind}` : job.kind];
-      if (!handler) throw new Error(`NO_HANDLER: no handler for ${job.kind} ${job.connector_kind ?? ''}`.trim());
-      const result = (await handler(this.context(job))) ?? {};
-      await this.queue((db) => db.query('select integration.complete_job($1, $2, $3::jsonb)', [job.job_id, this.o.workerId, JSON.stringify(result)]));
-      return { outcome: 'succeeded', jobId: job.job_id, result };
-    } catch (err) {
-      const error = (err as Error).message || String(err);
-      const status = await this.queue(async (db) => (await db.query('select integration.fail_job($1, $2, $3, $4) s',
-        [job.job_id, this.o.workerId, error, this.o.retryInSeconds?.(job.attempt) ?? null])).rows[0].s);
-      return { outcome: 'failed', jobId: job.job_id, status, error };
+      let result: Record<string, unknown> = {};
+      let error = '';
+      try {
+        const handler = this.o.handlers[job.kind === 'connector_sync' ? `sync:${job.connector_kind}` : job.kind];
+        if (!handler) throw new Error(`NO_HANDLER: no handler for ${job.kind} ${job.connector_kind ?? ''}`.trim());
+        result = (await handler(ctx)) ?? {};
+      } catch (err) {
+        error = (err as Error).message || String(err);
+      }
+      clearInterval(timer);
+      if (lease.signal.aborted) return { outcome: 'lease_lost', jobId: job.job_id, error: lostReason || error };
+      try {
+        if (!error) {
+          await this.queue((db) => db.query('select integration.complete_job($1, $2, $3::jsonb)', [job.job_id, this.o.workerId, JSON.stringify(result)]));
+          return { outcome: 'succeeded', jobId: job.job_id, result };
+        }
+        const status = await this.queue(async (db) => (await db.query('select integration.fail_job($1, $2, $3, $4) s',
+          [job.job_id, this.o.workerId, error, this.o.retryInSeconds?.(job.attempt) ?? null])).rows[0].s);
+        return { outcome: 'failed', jobId: job.job_id, status, error };
+      } catch (err) {
+        const msg = (err as Error).message;
+        if (msg.startsWith('LEASE_LOST')) return { outcome: 'lease_lost', jobId: job.job_id, error: msg };
+        throw err;
+      }
+    } finally {
+      clearInterval(timer);
     }
   }
 

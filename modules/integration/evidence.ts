@@ -28,7 +28,7 @@ export async function storeEvidence(
     bucket: put.bucket,
     object_key: put.key,
     version_id: put.versionId,
-    retain_until: retainUntil.toISOString(),
+    retain_until: put.retainUntil.toISOString(),   // the lock actually in force
     extracted: args.extracted ?? null,
   })]);
   return { sourceDocumentId: rows[0].r.source_document_id, sha256: hash, existed: rows[0].r.existed };

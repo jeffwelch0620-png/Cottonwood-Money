@@ -214,11 +214,28 @@ describe('2. evidence cannot be overwritten or deleted before retention ends', (
     await expect(s.get('t/a')).rejects.toThrow(/^EVIDENCE_MISSING/);
   });
 
+  it('an object left with a shorter lock (its record rolled back) is re-locked before it is recorded', async () => {
+    const bytes = Buffer.from(`pos file ${randomUUID()}`);
+    const hash = sha256(bytes).toString('hex');
+    const shortLock = new Date(Date.now() + 30 * 86400_000);
+    await store.put(`${f.tenant}/${hash}`, bytes, { contentType: 'application/json', retainUntil: shortLock });
+    const ev = await withSession(pool, claimsOf(f.integration), (c) =>
+      storeEvidence(c, store, { tenantId: f.tenant, docType: 'pos_eod', bytes, contentType: 'application/json' }), { role: 'app_role' });
+    const recorded = (await su.query('select retain_until from integration.evidence_object where source_document_id = $1', [ev.sourceDocumentId])).rows[0].retain_until as Date;
+    expect(recorded.getTime()).toBeGreaterThan(Date.now() + 7 * 365 * 86400_000);
+    // the store's lock now holds until at least the recorded date
+    const s = new MemoryWormStore('probe', () => new Date(recorded.getTime() - 1000));
+    await s.put('k', bytes, { contentType: 'x', retainUntil: shortLock });
+    expect((await s.put('k', bytes, { contentType: 'x', retainUntil: recorded })).retainUntil).toEqual(recorded);
+    await expect(s.delete('k', null)).rejects.toThrow(/^OBJECT_LOCKED/);
+  });
+
   it('S3: every upload is COMPLIANCE-locked, no-overwrite, and checksum-verified', async () => {
     const sent: any[] = [];
     const bytes = Buffer.from('pos file');
     const checksum = sha256(bytes).toString('base64');
     let exists = false;
+    let lockedUntil: Date | undefined;
     const client = {
       async send(cmd: any) {
         sent.push({ name: cmd.constructor.name, input: cmd.input });
@@ -227,20 +244,34 @@ describe('2. evidence cannot be overwritten or deleted before retention ends', (
           exists = true;
           return { VersionId: 'v1' };
         }
-        if (cmd.constructor.name === 'HeadObjectCommand') return { ChecksumSHA256: checksum, VersionId: 'v1' };
+        if (cmd.constructor.name === 'HeadObjectCommand') return { ChecksumSHA256: checksum, VersionId: 'v1', ObjectLockMode: 'COMPLIANCE', ObjectLockRetainUntilDate: lockedUntil };
+        if (cmd.constructor.name === 'PutObjectRetentionCommand') { lockedUntil = cmd.input.Retention.RetainUntilDate; return {}; }
         throw new Error('unexpected');
       },
     };
     const s3 = new S3WormStore('evidence-prod', client);
     const until = defaultRetainUntil();
     expect(await s3.put('t/x', bytes, { contentType: 'application/json', retainUntil: until }))
-      .toEqual({ backend: 's3', bucket: 'evidence-prod', key: 't/x', versionId: 'v1', existed: false });
+      .toEqual({ backend: 's3', bucket: 'evidence-prod', key: 't/x', versionId: 'v1', existed: false, retainUntil: until });
     expect(sent[0]).toMatchObject({ name: 'PutObjectCommand', input: {
       Bucket: 'evidence-prod', Key: 't/x', IfNoneMatch: '*', ObjectLockMode: 'COMPLIANCE',
       ObjectLockRetainUntilDate: until, ChecksumSHA256: checksum } });
-    // Second put of the same bytes: S3 refuses the overwrite; the store confirms it is identical.
-    expect((await s3.put('t/x', bytes, { contentType: 'application/json', retainUntil: until })).existed).toBe(true);
+    lockedUntil = until;
+    // Second put of the same bytes: S3 refuses the overwrite; the store confirms it is identical,
+    // and a lock already at or past the requested date is left alone.
+    expect((await s3.put('t/x', bytes, { contentType: 'application/json', retainUntil: until })))
+      .toMatchObject({ existed: true, retainUntil: until });
     expect(sent[2]).toMatchObject({ name: 'HeadObjectCommand', input: { ChecksumMode: 'ENABLED' } });
+    expect(sent.length).toBe(3);
+    // An object locked earlier for less (its database record rolled back): the lock is extended first.
+    lockedUntil = new Date(Date.now() + 86400_000);
+    const later = defaultRetainUntil();
+    expect((await s3.put('t/x', bytes, { contentType: 'application/json', retainUntil: later })))
+      .toMatchObject({ existed: true, retainUntil: later });
+    expect(sent[5]).toMatchObject({ name: 'PutObjectRetentionCommand', input: {
+      Key: 't/x', VersionId: 'v1', Retention: { Mode: 'COMPLIANCE', RetainUntilDate: later } } });
+    expect(lockedUntil).toEqual(later);
+    sent.length = 3;
     // Different bytes under an existing key: refused.
     await expect(s3.put('t/x', Buffer.from('forged'), { contentType: 'application/json', retainUntil: until }))
       .rejects.toBeInstanceOf(EvidenceError);
@@ -373,6 +404,33 @@ describe('4. a failed job retries, then stops with a recorded error', () => {
     await asWorker((c2) => expectCode(c2.query(`select integration.fail_job($1, 'w-crash', 'late')`, [j]), 'LEASE_LOST'));
   });
 
+  it('a job longer than its lease keeps it: the worker renews while the handler runs', async () => {
+    const c = await newConnector();
+    const j = await requestSync(c, '2026-11-26');
+    const slow: Handler = async () => { await new Promise((r) => setTimeout(r, 6500)); return { done: true }; };
+    const [r] = await runJobs(worker('w-long', { 'sync:sample_pos': slow }, { leaseSeconds: 5, heartbeatMs: 500 }), [j]);
+    expect(r).toMatchObject({ outcome: 'succeeded', result: { done: true } });
+  }, 20_000);
+
+  it('if renewal fails (another worker took over), the handler can start no new work and its result is dropped', async () => {
+    const c = await newConnector();
+    const j = await requestSync(c, '2026-11-26');
+    let refused = '';
+    const h: Handler = async (ctx) => {
+      await su.query(`update integration.job set locked_by = 'w-other' where id = $1`, [ctx.job.job_id]); // taken over
+      await new Promise((r) => setTimeout(r, 300));
+      expect(ctx.signal.aborted).toBe(true);
+      try { await ctx.asTenant(async () => 1); } catch (e) { refused = (e as Error).message; }
+      return {};
+    };
+    const [r] = await runJobs(worker('w-lost', { 'sync:sample_pos': h }, { heartbeatMs: 50 }), [j]);
+    expect(r).toMatchObject({ outcome: 'lease_lost', error: expect.stringMatching(/^LEASE_LOST/) });
+    expect(refused).toMatch(/^LEASE_LOST/);
+    const job = (await su.query('select status, locked_by from integration.job where id = $1', [j])).rows[0];
+    expect(job).toEqual({ status: 'running', locked_by: 'w-other' }); // untouched by the worker that lost it
+    expect(await count(su, 'select count(*) n from integration.job_attempt where job_id = $1', [j])).toBe(0);
+  });
+
   it('parallel workers never run the same job twice', async () => {
     const c = await newConnector();
     const ids: string[] = [];
@@ -397,6 +455,16 @@ describe('4. a failed job retries, then stops with a recorded error', () => {
     await expect(db.query(`update integration.job set status = 'succeeded'`)).rejects.toThrow(/permission denied/);
     await expect(db.query(`select * from integration.claim_job('me')`)).rejects.toThrow(/permission denied/);
     await expect(db.query(`select integration.enqueue_due_syncs('2026-11-27')`)).rejects.toThrow(/permission denied/);
+  });
+});
+
+describe('function ownership', () => {
+  it('every SECURITY DEFINER function runs as ledger_owner, never as the migration login', async () => {
+    const { rows } = await su.query(`
+      select p.oid::regprocedure::text fn, pg_get_userbyid(p.proowner) owner from pg_proc p
+       where p.prosecdef and p.pronamespace::regnamespace::text in ('ledger', 'audit', 'app', 'integration', 'public')`);
+    expect(rows.filter((r) => r.fn.startsWith('integration.')).length).toBeGreaterThanOrEqual(15);
+    expect(rows.filter((r) => r.owner !== 'ledger_owner')).toEqual([]);
   });
 });
 

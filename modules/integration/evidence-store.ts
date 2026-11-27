@@ -3,6 +3,8 @@
 //
 // Guarantees every implementation must give (tests/integration-evidence.test.ts):
 //   - put never overwrites: an existing key with the same bytes is reported, different bytes refused
+//   - an existing object's lock is extended (never shortened) to the requested date, and put
+//     returns the lock actually in force, which is what gets recorded
 //   - nothing is deleted before its retain-until date
 //   - get returns exactly the bytes stored (callers re-check SHA-256)
 //
@@ -11,7 +13,7 @@
 // If-None-Match: * (no overwrite) and an S3-verified SHA-256 checksum.
 import { createHash } from 'node:crypto';
 import {
-  S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand,
+  S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, PutObjectRetentionCommand,
 } from '@aws-sdk/client-s3';
 
 export interface PutResult {
@@ -20,6 +22,8 @@ export interface PutResult {
   key: string;
   versionId: string | null;
   existed: boolean;
+  /** The retention lock in force after this call (>= the requested date). */
+  retainUntil: Date;
 }
 
 export interface EvidenceStore {
@@ -51,11 +55,12 @@ export class MemoryWormStore implements EvidenceStore {
     const cur = this.objects.get(key);
     if (cur) {
       if (!cur.bytes.equals(bytes)) throw new EvidenceError('EVIDENCE_COLLISION', `${key} exists with different bytes`);
-      return { backend: this.backend, bucket: this.bucket, key, versionId: cur.versionId, existed: true };
+      if (cur.retainUntil < opts.retainUntil) cur.retainUntil = opts.retainUntil; // extend, never shorten
+      return { backend: this.backend, bucket: this.bucket, key, versionId: cur.versionId, existed: true, retainUntil: cur.retainUntil };
     }
     const versionId = `v${++this.n}`;
     this.objects.set(key, { bytes: Buffer.from(bytes), retainUntil: opts.retainUntil, versionId });
-    return { backend: this.backend, bucket: this.bucket, key, versionId, existed: false };
+    return { backend: this.backend, bucket: this.bucket, key, versionId, existed: false, retainUntil: opts.retainUntil };
   }
 
   async get(key: string): Promise<Buffer> {
@@ -96,7 +101,7 @@ export class S3WormStore implements EvidenceStore {
         ObjectLockMode: 'COMPLIANCE',        // retention cannot be shortened or removed by anyone
         ObjectLockRetainUntilDate: opts.retainUntil,
       }));
-      return { backend: this.backend, bucket: this.bucket, key, versionId: r.VersionId ?? null, existed: false };
+      return { backend: this.backend, bucket: this.bucket, key, versionId: r.VersionId ?? null, existed: false, retainUntil: opts.retainUntil };
     } catch (err: any) {
       if (err?.name !== 'PreconditionFailed' && err?.$metadata?.httpStatusCode !== 412) throw err;
       // Already stored: fine only if it is the same bytes.
@@ -104,7 +109,18 @@ export class S3WormStore implements EvidenceStore {
       if (head.ChecksumSHA256 !== checksum) {
         throw new EvidenceError('EVIDENCE_COLLISION', `${key} exists with different bytes`);
       }
-      return { backend: this.backend, bucket: this.bucket, key, versionId: head.VersionId ?? null, existed: true };
+      // Its lock may be older (e.g. stored by a run whose database record rolled back). Extend it to
+      // the requested date before accepting it; COMPLIANCE retention can be extended, never shortened.
+      const current = head.ObjectLockRetainUntilDate ? new Date(head.ObjectLockRetainUntilDate) : null;
+      let retainUntil = current && head.ObjectLockMode === 'COMPLIANCE' ? current : null;
+      if (!retainUntil || retainUntil < opts.retainUntil) {
+        await this.client.send(new PutObjectRetentionCommand({
+          Bucket: this.bucket, Key: key, ...(head.VersionId ? { VersionId: head.VersionId } : {}),
+          Retention: { Mode: 'COMPLIANCE', RetainUntilDate: opts.retainUntil },
+        }));
+        retainUntil = opts.retainUntil;
+      }
+      return { backend: this.backend, bucket: this.bucket, key, versionId: head.VersionId ?? null, existed: true, retainUntil };
     }
   }
 

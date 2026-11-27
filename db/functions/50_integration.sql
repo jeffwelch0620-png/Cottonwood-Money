@@ -9,6 +9,10 @@
 -- The worker does tenant work (posting, evidence) in an app_role session as the job's run_as
 -- principal, so every ledger rule still applies to it.
 
+-- Owned by ledger_owner like every other function file: SECURITY DEFINER runs with the owner's
+-- rights, never the migration login's (superuser locally).
+set role ledger_owner;
+
 -- Caller helpers ---------------------------------------------------------------------------
 create or replace function integration._require_member() returns public.membership
 language plpgsql stable security definer set search_path = pg_catalog, public, pg_temp as $$
@@ -193,7 +197,6 @@ end $$;
 
 -- Claims the next ready job (skipping ones other workers hold). Jobs whose worker stopped
 -- responding (lease expired) are first counted as failed attempts.
-drop function if exists integration.claim_job(text, int);
 create or replace function integration.claim_job(p_worker text, p_lease_seconds int default 300)
 returns table (job_id uuid, tenant_id uuid, kind text, connector_id uuid, connector_kind text,
                connector_config jsonb, entity_id uuid, payload jsonb, attempt int,
@@ -397,3 +400,5 @@ begin
           coalesce(p->>'backend', 's3'), p->>'bucket', p->>'object_key', p->>'version_id', v_until);
   return jsonb_build_object('source_document_id', v_doc, 'existed', false);
 end $$;
+
+reset role;
