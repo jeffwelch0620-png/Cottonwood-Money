@@ -258,7 +258,7 @@ create or replace function ledger._lines_in_scope(p_lines jsonb) returns boolean
 language sql stable security definer set search_path = pg_catalog, public, pg_temp as $$
   select app.allowed_locations() is null
       or not exists (select 1 from jsonb_array_elements(coalesce(p_lines, '[]'::jsonb)) l
-                      where not coalesce((l->>'location_id') = any(app.allowed_locations()::text[]), false))
+                      where not coalesce(lower(l->>'location_id') = any(app.allowed_locations()::text[]), false))
 $$;
 
 -- Caller rules for posting-like actions: verified member, not a viewer, has a principal, not an agent.

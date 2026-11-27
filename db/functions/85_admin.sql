@@ -77,8 +77,13 @@ begin
     raise exception 'UNBALANCED: debits % <> credits %', v_dr, v_cr;
   end if;
 
-  v_payload := (p - 'created_by' - 'actor_type' - 'idempotency_key')
-               || jsonb_build_object('created_by', v_actor, 'actor_type', v_kind);
+  -- Store ids in canonical (lowercase) uuid form so scope checks compare like with like.
+  v_payload := (p - 'created_by' - 'actor_type' - 'idempotency_key' - 'lines')
+               || jsonb_build_object('created_by', v_actor, 'actor_type', v_kind,
+                    'lines', (select jsonb_agg(l || jsonb_build_object('account_id', (l->>'account_id')::uuid::text,
+                                                                       'location_id', (l->>'location_id')::uuid::text)
+                                               order by ord)
+                                from jsonb_array_elements(v_lines) with ordinality as x(l, ord)));
   insert into ledger.je_draft (tenant_id, entity_id, payload, created_by)
   values (m.tenant_id, v_entity, v_payload, v_actor) returning id into v_id;
   perform audit.append(m.tenant_id, v_kind, v_actor, 'draft.propose', 'je_draft', v_id,

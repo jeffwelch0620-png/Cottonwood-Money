@@ -145,6 +145,18 @@ describe('review (security, round 3): malformed drafts and duplicate reversal re
     await expectCode(db.query(`select ledger.reject_draft($1, 'bad')`, [d]), 'LOCATION_NOT_PERMITTED');
   });
 
+  it('uppercase uuids in a draft are stored canonically and stay visible to scoped reviewers', async () => {
+    const fx = await makeFixture(db);
+    await actAs(db, fx.clerk); // scoped to locA1
+    const d = (await db.query('select ledger.propose_entry($1::jsonb) id', [JSON.stringify({ tenant_id: fx.tenant, entity_id: fx.entityA,
+      entry_date: '2026-11-10', source_type: 'manual', memo: 'UPPER',
+      lines: [{ account_id: fx.acct.cogs.toUpperCase(), location_id: fx.locA1.toUpperCase(), debit: '2' },
+              { account_id: fx.acct.cash.toUpperCase(), location_id: fx.locA1.toUpperCase(), credit: '2' }] })])).rows[0].id;
+    const { rows } = await db.query(`select payload->'lines'->0->>'location_id' loc from ledger.je_draft where id = $1`, [d]);
+    expect(rows[0].loc).toBe(fx.locA1); // visible to the scoped proposer, stored lowercase
+    await db.query(`select ledger.reject_draft($1, 'withdrawn')`, [d]); // proposer can still withdraw
+  });
+
   it('two people requesting the same reversal at the same moment: exactly one draft', async () => {
     const fx = await makeFixture(db);
     const orig = await post(db, dsj(fx));
