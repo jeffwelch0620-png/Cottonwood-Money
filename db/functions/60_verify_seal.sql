@@ -13,6 +13,9 @@ declare
   n         bigint := 0;
   m         record;
 begin
+  if not exists (select 1 from public.entity where id = p_entity and tenant_id = app.current_tenant()) then
+    raise exception 'UNKNOWN_ENTITY: entity % is not in your tenant', p_entity;
+  end if;
   for e in select * from ledger.journal_entry where entity_id = p_entity order by seq loop
     n := n + 1;
     if e.seq <> exp_seq then
@@ -48,6 +51,9 @@ language plpgsql security definer set search_path = pg_catalog, public, pg_temp 
 declare
   s bigint; h bytea;
 begin
+  if not exists (select 1 from public.entity where id = p_entity and tenant_id = app.current_tenant()) then
+    raise exception 'UNKNOWN_ENTITY: entity % is not in your tenant', p_entity;
+  end if;
   select seq, hash into s, h from ledger.journal_entry
    where entity_id = p_entity order by seq desc limit 1;
   if s is null then
@@ -59,19 +65,25 @@ begin
 end $$;
 
 -- Seals a hard-closed period, recording the entity's chain head at that moment.
-create or replace function ledger.seal_period(p_period uuid, p_actor uuid) returns jsonb
+-- The actor is the session's principal (auth.uid() via membership), never a parameter.
+drop function if exists ledger.seal_period(uuid, uuid);
+create or replace function ledger.seal_period(p_period uuid) returns jsonb
 language plpgsql security definer set search_path = pg_catalog, public, pg_temp as $$
 declare
   pr public.period; h bytea; v_kind text;
+  p_actor uuid := app.current_principal();
 begin
-  select * into pr from public.period where id = p_period for update;
+  select * into pr from public.period where id = p_period and tenant_id = app.current_tenant() for update;
   if not found then raise exception 'NO_PERIOD: %', p_period; end if;
   if pr.status <> 'hard' then
     raise exception 'PERIOD_NOT_HARD: only hard-closed periods can be sealed (is %)', pr.status;
   end if;
-  select kind into v_kind from public.principal where id = p_actor and tenant_id = pr.tenant_id;
+  select kind into v_kind from public.principal where id = p_actor;
   if v_kind is distinct from 'user' then
     raise exception 'APPROVER_NOT_USER: only a person can seal a period';
+  end if;
+  if not app.has_role('owner', 'controller') then
+    raise exception 'ROLE_FORBIDDEN: only an owner or controller can seal a period';
   end if;
   perform pg_advisory_xact_lock(hashtextextended('ledger:' || pr.entity_id::text, 0));
   select hash into h from ledger.journal_entry where entity_id = pr.entity_id order by seq desc limit 1;

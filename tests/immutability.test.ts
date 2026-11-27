@@ -2,7 +2,7 @@
 // superuser who leaves triggers on.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type pg from 'pg';
-import { appClient, superClient, makeFixture, dsj, post, expectCode, type Fixture } from './helpers.js';
+import { appClient, superClient, makeFixture, dsj, post, actAs, expectCode, type Fixture } from './helpers.js';
 
 let db: pg.Client;
 let su: pg.Client;
@@ -62,6 +62,7 @@ describe('as ledger_owner and superuser', () => {
 describe('chart of accounts', () => {
   it('accounts are never deleted and their identity never changes', async () => {
     // app_role has no DELETE grant at all; the trigger stops even a superuser.
+    await actAs(db, f.user2);
     await expect(db.query(`delete from account where id = $1`, [f.acct.cogs])).rejects.toThrow(/permission denied/);
     await expectCode(su.query(`delete from account where id = $1`, [f.acct.cogs]), 'ACCOUNT_IMMUTABLE');
     await expectCode(db.query(`update account set number = '5999' where id = $1`, [f.acct.cogs]), 'ACCOUNT_IMMUTABLE');

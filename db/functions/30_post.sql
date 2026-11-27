@@ -31,6 +31,10 @@ declare
   v_head_seq  bigint;
   v_head_hash bytea;
   v_orig     ledger.journal_entry;
+  v_member   public.membership;
+  v_caller   uuid;
+  v_caller_kind text;
+  v_soft     boolean := false;
 begin
   -- 0. Required fields -----------------------------------------------------------------
   begin
@@ -43,6 +47,29 @@ begin
   if v_tenant is null or v_entity is null or v_date is null or v_src is null
      or coalesce(v_key, '') = '' or p->>'actor_type' is null or p->>'created_by' is null then
     raise exception 'MISSING_FIELD: tenant_id, entity_id, entry_date, source_type, idempotency_key, actor_type and created_by are required';
+  end if;
+
+  -- 0b. Caller: a verified member of THIS tenant, acting as their own principal -------
+  v_member := app.current_member();
+  if v_member.tenant_id is null then
+    raise exception 'NOT_AUTHENTICATED: no verified, MFA-complete membership for this session';
+  end if;
+  if v_tenant <> v_member.tenant_id then
+    raise exception 'TENANT_MISMATCH: entry is for tenant %, session is for tenant %', v_tenant, v_member.tenant_id;
+  end if;
+  if v_member.role = 'viewer' then
+    raise exception 'ROLE_FORBIDDEN: viewers cannot post';
+  end if;
+  select id, kind into v_caller, v_caller_kind from public.principal
+   where tenant_id = v_member.tenant_id and auth_user_id = v_member.user_id;
+  if v_caller is null then
+    raise exception 'NO_PRINCIPAL: this login has no principal in the tenant';
+  end if;
+  if (v_member.role = 'service') <> (v_caller_kind <> 'user') then
+    raise exception 'MEMBERSHIP_KIND_MISMATCH: role % cannot act as a % principal', v_member.role, v_caller_kind;
+  end if;
+  if v_caller_kind = 'agent' then
+    raise exception 'AGENT_CANNOT_POST: agents propose; a person or integration must post';
   end if;
 
   if not exists (select 1 from public.entity where id = v_entity and tenant_id = v_tenant) then
@@ -74,7 +101,6 @@ begin
   -- 4. Actors and approval (segregation of duties) ------------------------------------
   e.actor_type := p->>'actor_type';
   e.created_by := (p->>'created_by')::uuid;
-  e.approved_by := nullif(p->>'approved_by', '')::uuid;
 
   select kind into v_kind from public.principal where id = e.created_by and tenant_id = v_tenant;
   if v_kind is null then
@@ -84,18 +110,31 @@ begin
     raise exception 'ACTOR_MISMATCH: creator is a %, entry says %', v_kind, e.actor_type;
   end if;
 
-  if e.approved_by is not null then
-    v_kind := null;
-    select kind into v_kind from public.principal where id = e.approved_by and tenant_id = v_tenant;
-    if v_kind is null then
-      raise exception 'UNKNOWN_PRINCIPAL: approver % is not in tenant', e.approved_by;
-    end if;
-    if v_kind <> 'user' then
-      raise exception 'APPROVER_NOT_USER: only people can approve; approver is a %', v_kind;
-    end if;
-    if e.approved_by = e.created_by then
+  -- A human creator must be a real, active member (no ghost principals as "the other person").
+  if v_kind = 'user' and not exists (
+       select 1 from public.principal pr
+         join public.membership m on m.user_id = pr.auth_user_id and m.tenant_id = pr.tenant_id
+        where pr.id = e.created_by and m.active and m.role <> 'viewer') then
+    raise exception 'CREATOR_NOT_MEMBER: creator % has no active membership', e.created_by;
+  end if;
+
+  -- The approver is never taken from input: it is the caller, when the caller is not the
+  -- creator. An approved_by in the input may only restate that.
+  if v_caller = e.created_by then
+    if nullif(p->>'approved_by', '')::uuid = e.created_by then
       raise exception 'SELF_APPROVAL: creator cannot approve their own entry';
+    elsif nullif(p->>'approved_by', '') is not null then
+      raise exception 'APPROVER_NOT_CALLER: approval must be given in the approver''s own session';
     end if;
+    e.approved_by := null;
+  else
+    if nullif(p->>'approved_by', '') is not null and (p->>'approved_by')::uuid <> v_caller then
+      raise exception 'APPROVER_NOT_CALLER: approval must be given in the approver''s own session';
+    end if;
+    if v_caller_kind <> 'user' then
+      raise exception 'APPROVER_NOT_USER: only people can approve; caller is a %', v_caller_kind;
+    end if;
+    e.approved_by := v_caller;
   end if;
   if v_src in ('manual', 'reversal', 'opening') and e.approved_by is null then
     raise exception 'APPROVAL_REQUIRED: % entries need a second-person approver', v_src;
@@ -107,8 +146,13 @@ begin
   if not found then
     raise exception 'NO_PERIOD: no fiscal period covers % for this entity', v_date;
   end if;
-  if not (v_period.status = 'open'
-          or (v_period.status = 'soft' and coalesce((p->>'allow_soft_close')::boolean, false))) then
+  if v_period.status = 'soft' and coalesce((p->>'allow_soft_close')::boolean, false) then
+    if v_member.role <> 'controller' then
+      raise exception 'SOFT_CLOSE_FORBIDDEN: only a controller can post into a soft-closed period';
+    end if;
+    v_soft := true;
+  end if;
+  if not (v_period.status = 'open' or v_soft) then
     raise exception 'PERIOD_CLOSED: period % is %', v_period.id, v_period.status;
   end if;
 
@@ -149,6 +193,10 @@ begin
                     where id = (v_line->>'location_id')::uuid and entity_id = v_entity) then
       raise exception 'LOCATION_NOT_IN_ENTITY: line % location does not belong to this entity', v_n;
     end if;
+    if v_member.location_ids is not null
+       and not ((v_line->>'location_id')::uuid = any(v_member.location_ids)) then
+      raise exception 'LOCATION_NOT_PERMITTED: line % location is outside your location scope', v_n;
+    end if;
 
     insert into ledger.journal_line
       (entry_id, line_no, tenant_id, entity_id, account_id, location_id, debit, credit, dims)
@@ -162,6 +210,9 @@ begin
 
   if v_dr <> v_cr then
     raise exception 'UNBALANCED: debits % <> credits %', v_dr, v_cr;
+  end if;
+  if e.approved_by is not null and v_member.approval_limit is not null and v_dr > v_member.approval_limit then
+    raise exception 'APPROVAL_LIMIT: entry total % exceeds your approval limit %', v_dr, v_member.approval_limit;
   end if;
 
   -- 7. Evidence (I5) -------------------------------------------------------------------
@@ -226,7 +277,8 @@ begin
 
   perform audit.append(v_tenant, e.actor_type, e.created_by, 'ledger.post', 'journal_entry', e.id,
     jsonb_build_object('entity_id', v_entity, 'seq', e.seq, 'source_type', v_src,
-                       'hash', encode(e.hash, 'hex'), 'approved_by', e.approved_by));
+                       'hash', encode(e.hash, 'hex'), 'approved_by', e.approved_by,
+                       'posted_by', v_caller, 'soft_close_override', v_soft));
   return e;
 end $$;
 

@@ -9,7 +9,8 @@ declare
   lines jsonb;
   ev    jsonb;
 begin
-  select * into o from ledger.journal_entry where id = (p->>'entry_id')::uuid;
+  select * into o from ledger.journal_entry
+   where id = (p->>'entry_id')::uuid and tenant_id = app.current_tenant();
   if not found then
     raise exception 'REVERSAL_LINK: entry % not found', p->>'entry_id';
   end if;

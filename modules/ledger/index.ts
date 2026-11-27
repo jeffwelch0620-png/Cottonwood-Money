@@ -32,7 +32,8 @@ export const PostEntrySchema = z
     memo: z.string().optional(),
     actor_type: z.enum(['user', 'agent', 'integration']),
     created_by: uuid,
-    approved_by: uuid.optional(),
+    approved_by: uuid.optional(), // must equal the session's principal if given; the DB derives it
+    allow_soft_close: z.boolean().optional(), // honored only for a controller session
     evidence_ids: z.array(uuid).default([]),
     lines: z.array(LineSchema).min(2),
   })
@@ -86,7 +87,8 @@ export async function postEntry(db: ClientBase, input: PostEntryInput): Promise<
 
 export async function reverseEntry(
   db: ClientBase,
-  input: { entry_id: string; created_by: string; approved_by: string; entry_date?: string; idempotency_key?: string; memo?: string },
+  // The approver is the session's user; approved_by, if given, must match it.
+  input: { entry_id: string; created_by: string; approved_by?: string; entry_date?: string; idempotency_key?: string; memo?: string },
 ): Promise<PostResult> {
   try {
     const { rows } = await db.query('select ledger.reverse_entry($1::jsonb) as r', [JSON.stringify(input)]);

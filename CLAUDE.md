@@ -38,21 +38,28 @@ npm run typecheck
 Needs Postgres 14+ with btree_gist. In a fresh Linux container: `service postgresql start`,
 then set the postgres password to `postgres`.
 
-## Status (2026-11-26)
-Phase 0 steps 1–4 done: migrations 0000–0004, posting/reversal/intercompany functions,
-hash chain + verifier + manifest + seal. 50/50 tests pass; 50k-entry property run clean;
-~410 posts/s on one entity with 50 parallel writers.
+## Status (2026-11-27)
+Phase 0 steps 1–5 done. Step 5: migrations 0005 (membership, principal.auth_user_id, auth
+shim) and 0006 (balance backstop runs as owner, so RLS can't hide lines from it);
+`db/functions/05_auth.sql` (app.current_member/tenant/principal, create_tenant) and
+`90_rls.sql` (RLS on all 13 tenant tables). The three gaps are closed (tenant check,
+controller-only soft close, actor from session). 77/77 tests pass; ~426 posts/s on one entity.
+See README "Auth model" and "Known gaps".
 
-## Next: Phase 0 step 5 (weeks 5–6) — auth, membership, RLS
-- `membership` table (user_id, tenant_id, role, location_ids, approval_limit); Supabase Auth with MFA.
-- `app.current_tenant()` from `auth.uid()` + JWT tenant claim, verified against membership.
-- RLS on every tenant table + CI test that fails if any tenant table lacks RLS.
-- Close the open gaps (see README "Known gaps"):
-  - post_entry must check `input.tenant_id = app.current_tenant()`.
-  - `allow_soft_close` only honored for the controller role.
-  - `seal_period` / approvals take the actor from `auth.uid()`, not a parameter.
-- Then steps 6–10 per the Phase 0 Build Spec §10 (fiscal calendars, cash/accrual views +
-  reports, admin console, 1M-entry run + CPA review, exit gate).
+Owner decisions pending (made provisionally in step 5, reopen if wrong):
+- People need MFA (aal2) for ANY database access; `service` logins are exempt.
+- Sealing requires owner or controller; soft-close override is controller only (owner too?).
+- Agents cannot post even their own entries; whoever posts an agent's entry becomes its approver.
+- The DB trusts claims set by the app (Supabase model) vs verifying the JWT in-DB.
+
+## Next: Phase 0 step 6 — fiscal calendars (4-4-5, 13-period)
+- Then steps 7–10 per the Phase 0 Build Spec §10 (cash/accrual views + reports, admin
+  console, 1M-entry run + CPA review, exit gate).
+
+## Test conventions (step 5+)
+- Every app_role session needs claims: `actAs(db, principalId)` in tests; `withSession()` in app code.
+- `post(db, entry, as?)` acts as `as`, else the entry's approver, else its creator.
+- RLS filters silently: an UPDATE from the wrong role affects 0 rows, not an error. Assert rowCount.
 
 ## Working style for this owner
 Logic first, short explanations, show the math in summary form, diagrams welcome.

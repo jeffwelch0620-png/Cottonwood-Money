@@ -24,6 +24,41 @@ export function appPool(max = 20): pg.Pool {
   return p;
 }
 
+/** Sets (or clears, with null) the JWT claims for this session, as Supabase/PostgREST would. */
+export async function setClaims(db: pg.ClientBase, claims: Record<string, unknown> | null) {
+  await db.query(`select set_config('request.jwt.claims', $1, false)`, [claims ? JSON.stringify(claims) : '']);
+}
+
+/** principal id -> its login and tenant, so tests can act as any fixture principal. */
+const actors = new Map<string, { auth: string; tenant: string }>();
+
+/** Act as a fixture principal: verified member of its tenant, MFA complete unless overridden. */
+export async function actAs(db: pg.ClientBase, principalId: string, over: Record<string, unknown> = {}) {
+  const a = actors.get(principalId);
+  if (!a) throw new Error(`no login registered for principal ${principalId}`);
+  await setClaims(db, { sub: a.auth, tenant_id: a.tenant, aal: 'aal2', role: 'authenticated', ...over });
+}
+
+export function authOf(principalId: string) {
+  const a = actors.get(principalId);
+  if (!a) throw new Error(`no login registered for principal ${principalId}`);
+  return a.auth;
+}
+
+/** Creates Supabase-style auth users (in production, Supabase Auth does this). */
+export async function createAuthUsers(n: number): Promise<string[]> {
+  const su = await superClient();
+  try {
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      ids.push((await su.query(`insert into auth.users (email) values ($1) returning id`, [`u${randomUUID()}@test.local`])).rows[0].id);
+    }
+    return ids;
+  } finally {
+    await su.end();
+  }
+}
+
 /** A superuser connection: used only to simulate attackers and to inspect. */
 export async function superClient(): Promise<pg.Client> {
   const c = new pg.Client({ connectionString: TEST_URL });
@@ -37,6 +72,8 @@ export interface Fixture {
   user2: string;
   agent: string;
   integration: string;
+  clerk: string;   // bookkeeper, location A1 only, approval limit 1000
+  viewer: string;
   entityA: string;
   entityB: string;
   locA1: string;
@@ -47,17 +84,38 @@ export interface Fixture {
   doc: string;
 }
 
-/** Builds a complete tenant using the app role (which also proves the app's grants work). */
+/**
+ * Builds a complete tenant through the app role, the way the product will: the owner signs
+ * up (app.create_tenant), then adds members and principals under RLS. Leaves the session
+ * acting as the owner.
+ */
 export async function makeFixture(db: pg.ClientBase): Promise<Fixture> {
   const one = async (sql: string, params: unknown[]) => (await db.query(sql, params)).rows[0].id as string;
 
-  const tenant = await one(`insert into tenant (name) values ($1) returning id`, [`Test group ${randomUUID().slice(0, 8)}`]);
-  const principal = (kind: string, name: string) =>
-    one(`insert into principal (tenant_id, kind, name) values ($1,$2,$3) returning id`, [tenant, kind, name]);
-  const user1 = await principal('user', 'Controller');
-  const user2 = await principal('user', 'Owner');
-  const agent = await principal('agent', 'AP agent v1');
-  const integration = await principal('integration', 'Toast connector');
+  const [ownerAuth, controllerAuth, agentAuth, integrationAuth, clerkAuth, viewerAuth] = await createAuthUsers(6);
+  await setClaims(db, { sub: ownerAuth, aal: 'aal2' });
+  const tenant = await one(`select app.create_tenant($1, 'Owner') as id`, [`Test group ${randomUUID().slice(0, 8)}`]);
+  await setClaims(db, { sub: ownerAuth, tenant_id: tenant, aal: 'aal2' });
+  const user2 = await one(`select id from principal where tenant_id = $1 and auth_user_id = $2`, [tenant, ownerAuth]);
+  actors.set(user2, { auth: ownerAuth, tenant });
+
+  const member = (auth: string, role: string, extra: { location_ids?: string[]; approval_limit?: string } = {}) =>
+    db.query(`insert into membership (user_id, tenant_id, role, location_ids, approval_limit) values ($1,$2,$3,$4,$5)`,
+      [auth, tenant, role, extra.location_ids ?? null, extra.approval_limit ?? null]);
+  const principal = async (kind: string, name: string, auth: string) => {
+    const id = await one(`insert into principal (tenant_id, kind, name, auth_user_id) values ($1,$2,$3,$4) returning id`,
+      [tenant, kind, name, auth]);
+    actors.set(id, { auth, tenant });
+    return id;
+  };
+  await member(controllerAuth, 'controller');
+  await member(agentAuth, 'service');
+  await member(integrationAuth, 'service');
+  await member(viewerAuth, 'viewer');
+  const user1 = await principal('user', 'Controller', controllerAuth);
+  const agent = await principal('agent', 'AP agent v1', agentAuth);
+  const integration = await principal('integration', 'Toast connector', integrationAuth);
+  const viewer = await principal('user', 'Read-only investor', viewerAuth);
 
   const entity = (name: string) =>
     one(`insert into entity (tenant_id, legal_name) values ($1,$2) returning id`, [tenant, name]);
@@ -105,7 +163,10 @@ export async function makeFixture(db: pg.ClientBase): Promise<Fixture> {
     [tenant, `s3://evidence/${randomUUID()}.json`, createHash('sha256').update(randomUUID()).digest()],
   );
 
-  return { tenant, user1, user2, agent, integration, entityA, entityB, locA1, locA2, locB1, acct, periods, doc };
+  await member(clerkAuth, 'bookkeeper', { location_ids: [locA1], approval_limit: '1000' });
+  const clerk = await principal('user', 'Store 1 bookkeeper', clerkAuth);
+
+  return { tenant, user1, user2, agent, integration, clerk, viewer, entityA, entityB, locA1, locA2, locB1, acct, periods, doc };
 }
 
 /** A valid daily-sales entry for entity A; override any field. */
@@ -128,7 +189,14 @@ export function dsj(f: Fixture, over: Record<string, unknown> = {}) {
   };
 }
 
-export async function post(db: pg.ClientBase, entry: unknown) {
+/**
+ * Posts an entry. The session acts as `as`, else the entry's approver (approval is given in
+ * the approver's own session), else its creator.
+ */
+export async function post(db: pg.ClientBase, entry: unknown, as?: string) {
+  const e = entry as { approved_by?: string; created_by?: string };
+  const caller = as ?? e.approved_by ?? e.created_by;
+  if (caller && actors.has(caller)) await actAs(db, caller);
   const { rows } = await db.query('select ledger.post_entry($1::jsonb) as r', [JSON.stringify(entry)]);
   return rows[0].r as { id: string; seq: number; hash: string; entity_id: string };
 }
