@@ -2,7 +2,7 @@
 // Every refusal here comes from the database, with the app role and a JWT-claims session.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes } from 'node:crypto';
 import {
   appClient, superClient, makeFixture, dsj, post, actAs, setClaims, authOf, createAuthUsers,
   expectCode, count, TEST_URL, type Fixture,
@@ -43,7 +43,32 @@ beforeAll(async () => {
   await actAs(db, a.agent);
   await db.query('select ledger.propose_entry($1::jsonb)', [JSON.stringify(dsj(a, { source_type: 'ap_bill', created_by: undefined, actor_type: undefined }))]);
   await post(db, dsj(b));
+  await seedIntegration(a);
 });
+
+// Phase 1 step 1.1 tables: a connector with a secret, a job with an attempt, a sync run, evidence.
+async function seedIntegration(f: Fixture) {
+  await actAs(db, f.user2);
+  const c = (await db.query('select integration.create_connector($1::jsonb) id', [JSON.stringify({
+    kind: 'sample_pos', name: 'Isolation POS', entity_id: f.entityA, run_as: f.integration, config: {} })])).rows[0].id;
+  await db.query('select integration.set_connector_secret($1, $2, $3)', [c, Buffer.concat([Buffer.from([1]), randomBytes(40)]), 'k1']);
+  const job = (await db.query(`select integration.request_sync($1, 'isolation') id`, [c])).rows[0].id;
+  await su.query('begin');
+  await su.query('set local role worker_role');
+  // Claim until we hold the seeded job (other files may have left jobs behind), then fail it once.
+  for (;;) {
+    const got = (await su.query(`select job_id from integration.claim_job('rls-seed', 60)`)).rows[0];
+    if (!got) throw new Error('seed job not claimable');
+    await su.query(`select integration.fail_job($1, 'rls-seed', 'seed failure', 3600)`, [got.job_id]);
+    if (got.job_id === job) break;
+  }
+  await su.query('commit');
+  await actAs(db, f.integration);
+  await db.query(`select integration.start_sync_run($1, 'isolation')`, [c]);
+  await db.query('select integration.register_evidence($1::jsonb)', [JSON.stringify({
+    doc_type: 'pos_eod', sha256: randomBytes(32).toString('hex'), size_bytes: 1, content_type: 'application/json',
+    backend: 'memory', bucket: 'b', object_key: 'k', retain_until: new Date(Date.now() + 8 * 365 * 86400_000).toISOString() })]);
+}
 afterAll(async () => {
   await db.end();
   await su.end();
@@ -59,13 +84,13 @@ describe('CI guard: every tenant table has row-level security', () => {
              (select count(*) from pg_policy p
                where p.polrelid = c.oid and 'app_role'::regrole::oid = any(p.polroles))::int as app_policies
         from pg_class c join pg_namespace n on n.oid = c.relnamespace
-       where c.relkind in ('r', 'p') and n.nspname in ('public', 'ledger', 'audit', 'app')`);
+       where c.relkind in ('r', 'p') and n.nspname in ('public', 'ledger', 'audit', 'app', 'integration')`);
     const missing = rows
       .filter((r) => !GLOBAL_TABLES.includes(r.t))
       .filter((r) => !r.rls || r.app_policies === 0)
       .map((r) => r.t);
     expect(missing).toEqual([]);
-    expect(rows.length).toBeGreaterThanOrEqual(14);
+    expect(rows.length).toBeGreaterThanOrEqual(20);
   });
 
   it('app_role cannot bypass RLS', async () => {
@@ -76,8 +101,9 @@ describe('CI guard: every tenant table has row-level security', () => {
   it("a member of tenant B sees none of tenant A's rows in any tenant table", async () => {
     const { rows: tables } = await su.query(`
       select format('%I.%I', table_schema, table_name) t from information_schema.columns
-       where column_name = 'tenant_id' and table_schema in ('public', 'ledger', 'audit')`);
-    expect(tables.length).toBeGreaterThanOrEqual(11);
+       where column_name = 'tenant_id' and table_schema in ('public', 'ledger', 'audit', 'integration')
+         and table_name <> 'connector_secret'`);
+    expect(tables.length).toBeGreaterThanOrEqual(16);
     for (const { t } of tables) {
       await actAs(db, a.user2);
       const mine = await count(db, `select count(*) n from ${t} where tenant_id = $1`, [a.tenant]);
@@ -85,6 +111,9 @@ describe('CI guard: every tenant table has row-level security', () => {
       const theirs = await count(db, `select count(*) n from ${t} where tenant_id = $1`, [a.tenant]);
       expect({ t, mine: mine > 0, theirs }).toEqual({ t, mine: true, theirs: 0 });
     }
+    // connector_secret: not even its own tenant can read it
+    await expect(db.query('select count(*) from integration.connector_secret')).rejects.toThrow(/permission denied/);
+    expect(await count(su, 'select count(*) n from integration.connector_secret where tenant_id = $1', [a.tenant])).toBe(1);
     // tenant (keyed by id) and chain_manifest (keyed by entity)
     expect(await count(db, 'select count(*) n from tenant where id = $1', [a.tenant])).toBe(0);
     expect(await count(db, 'select count(*) n from ledger.chain_manifest where entity_id = $1', [a.entityA])).toBe(0);

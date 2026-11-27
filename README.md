@@ -50,20 +50,26 @@ db/migrations/   0000 roles · 0001 tenancy/COA/periods · 0002 evidence/audit �
                  0007 fiscal calendar settings, period position, reopen requests
                  0008 payment_application, AR source types
                  0009 JE drafts, last-owner rule, setup audit trail · 0010 cash_view fixed once posted
+                 0011–0014 review fixes, journal_line entity index, no PUBLIC EXECUTE by default
+                 0015 integration schema: connectors, secrets, job queue, sync runs, evidence objects
 db/functions/    session identity (app.*) · audit chain · canonical form + hash · post_entry ·
+                 integration (connectors, write-only secrets, queue, sync runs, evidence) ·
                  reverse/intercompany · verify/manifest/seal · periods/close/reopen ·
                  cash view + reports + payment application · admin (drafts, COA template,
                  JE viewer, audit export) · RLS policies · grants
 apps/api/        Fastify server: Supabase JWT → withSession(app_role) → database functions
 apps/admin/      Next.js console over the API (own package); e2e/flows.cjs drives it in a browser
+apps/worker/     job worker loop (`npm run worker`) and nightly scheduler (`npm run worker -- schedule DAY`)
 scripts/         dev-token · dev-seed (demo tenant) · e2e-admin.sh
 db/migrate.ts    migration runner (numbered files once; functions re-applied every run)
 modules/shared/  money (Decimal, never JS numbers)
 modules/ledger/  TypeScript entry points + typed LedgerError codes
 modules/auth/    withSession(): verified JWT claims set per transaction
+modules/integration/ Worker · evidence stores (S3 Object Lock, in-memory WORM) · secret sealing ·
+                 repeat-safe sync runs · sample POS and manifest-export connectors
 modules/reporting/ trialBalance · profitAndLoss · balanceSheet · cashAccrualTieOut (Decimal totals)
 tests/           invariants · immutability · idempotency/concurrency · tamper · property · module · auth-rls ·
-                 periods · cash-accrual · admin · api
+                 periods · cash-accrual · admin · api · integration
 ```
 
 ## What the database enforces
@@ -209,6 +215,39 @@ Tenants are created only by `app.create_tenant()` (sign-up), which makes the cal
 Errors come back as `CODE: detail` (`UNBALANCED`, `PERIOD_CLOSED`, `SELF_APPROVAL`, …) and
 are mapped to `LedgerError.code` in TypeScript.
 
+## Integration base (Phase 1 step 1.1)
+
+```
+ cron ──enqueue_due_syncs(day)──▶ integration.job ◀──request_sync── person (owner/controller/bookkeeper)
+                                       │ claim_job (lease, SKIP LOCKED)   [worker_role: no table access]
+                                       ▼
+                                   Worker ──read_secret (lease holder only)──▶ AES-GCM ciphertext → decrypt in app
+                                       │ asTenant: app_role session as the connector's integration principal
+                                       ▼
+            start_sync_run ─▶ fetch ─▶ evidence: S3 put (COMPLIANCE lock, If-None-Match, SHA-256) ─▶ register_evidence
+                                    ─▶ post_entry(idempotency_key = sync:<connector>:<scope>:<item>) ─▶ finish_sync_run
+                                       │
+                         complete_job ◀┴▶ fail_job: attempts < max → requeue (30 s · 2^(n-1), ≤ 1 h) else dead + last_error
+```
+
+| Rule | How the database (or S3) enforces it |
+|---|---|
+| A re-run posts nothing twice | Deterministic idempotency key per item; `post_entry` returns the original. Same bytes → same SHA-256 → same source document. One *running* run per (connector, scope): partial unique index → `SYNC_RUNNING`; a run whose lease passed becomes `abandoned` |
+| Evidence can't be overwritten or deleted early | `evidence_object` insert-only (trigger, even for the owner); `register_evidence` refuses a lock shorter than 7 years (`RETENTION_TOO_SHORT`). Bytes: S3 COMPLIANCE-mode Object Lock (no one can shorten it), `If-None-Match: *`, S3-verified SHA-256; content-addressed keys `<tenant>/<sha256>`. An object already present (e.g. its record rolled back) has its lock extended to the new date before the database records it |
+| app_role can't read secrets | No SELECT grant + deny-all RLS on `connector_secret`; `read_secret` executes only as `worker_role`, only for the job the caller holds (`LEASE_LOST` otherwise). Stored value is AES-256-GCM ciphertext (`NOT_ENCRYPTED` refuses anything else), connector id bound as AAD. Config keys that look like credentials → `SECRET_IN_CONFIG` |
+| Long jobs keep their lease | The worker renews the lease every third of its length while the handler runs; if renewal fails (another worker took over), `asTenant` refuses new work and the result is dropped (`lease_lost`) |
+| Failed job retries, then stops | Each attempt is a row in the insert-only `job_attempt` (outcome + error). 5 attempts by default, then `dead` with `last_error`. A worker that goes silent loses its lease; the lapse is a recorded `lease_expired` attempt and its late result is refused |
+| Integrations follow ledger rules | The worker posts as the connector's `run_as` integration principal (active `service` login, checked at create) through `post_entry`, so every ledger rule applies |
+
+Connector kinds now: `sample_pos` (deterministic sample end-of-day file; stands in for Toast until
+credentials exist) and `manifest_export` (nightly: `take_manifest` + `verify_chain` per entity +
+audit head, written as a locked evidence file; a broken chain fails the job loudly and the manifest
+showing it is kept). Worker env: `DATABASE_URL`, `CONNECTOR_KEYS=id:base64(32 bytes),...`,
+`EVIDENCE_BUCKET` (bucket created with Object Lock) or `EVIDENCE_BACKEND=memory` for development.
+
+The S3 adapter is tested at the request level (lock mode, retain-until, no-overwrite, checksum,
+412 handling), not yet against a live bucket: that waits for the AWS account (Phase 1 owner inputs).
+
 ## Exit gate
 
 Phase 0 exit-gate review: [`docs/exit-gate/README.md`](docs/exit-gate/README.md). Five of six
@@ -221,7 +260,11 @@ conditions met; the CPA review is provisionally approved by the owner, with the 
   balanced on every date, tie-out difference 0.0000. Posting 858 entries/s across 10 entities.
 - CI on every pull request: ledger tests on Postgres 16, type checks, console build, browser e2e.
 
-- 133 / 133 tests pass on a fresh database; TypeScript type check clean.
+- 180 / 180 tests pass on a fresh database; TypeScript type check clean.
+- Step 1.1: 30 integration tests (re-sync posts nothing twice; evidence insert-only and 7-year floor;
+  WORM store and S3 request shape; secrets unreadable by every app login; retries → dead with each
+  attempt's error; lease expiry; 4 parallel workers × 12 jobs, each run exactly once; manifest export
+  detects a tampered chain). The RLS guard now covers the `integration` schema.
 - Step 8a: the full admin journey (sign-up → COA template → 4-4-5 entity → member → two-person manual
   JE → reports → close → two-person reopen → audit export) runs through HTTP in one test. Mutation
   check: removing the last-owner lock lets two owners demote each other (test fails).
@@ -251,7 +294,6 @@ conditions met; the CPA review is provisionally approved by the owner, with the 
 |---|---|---|
 | DB trusts the `request.jwt.claims` setting | Same model as Supabase/PostgREST: the caller verifies the JWT and sets the claim. A compromised app server holding `app_role` could set any claim | Decide: verify JWT signature in-DB, or route through PostgREST |
 | Supabase deploy not yet tried | Local shim stands in for `auth.users` / `auth.uid()` / `auth.jwt()`; need to confirm grants on `auth` to `ledger_owner` and the custom-claims hook that adds `tenant_id` | Before first staging deploy |
-| Manifest worker needs a tenant session | `verify_chain` / `take_manifest` now check the session tenant | Run the nightly worker as a per-tenant `service` member, or add a maintenance role |
 | Journal entry headers aren't location-scoped | Lines are filtered by `location_ids`; headers (memo) are tenant-wide | Phase 0 step 8 (admin console) if needed |
 | Changing an entity's calendar | Settings are fixed once periods exist; switching at a year boundary needs a conversion workflow | When a customer asks |
 | Tenant switching in the console | The JWT's tenant_id comes from a Supabase custom access token hook (not built); one tenant per login until then | Supabase deployment |
@@ -262,6 +304,9 @@ conditions met; the CPA review is provisionally approved by the owner, with the 
 | Applications into closed periods | A prepaid or deposit applied after its payment's period closed is refused | CPA review (week 10–11) |
 | Applications aren't hash-chained | Each is in the hash-chained audit log; the verifier doesn't cross-check them yet | With the manifest worker |
 | Sealing doesn't anchor externally | Seal hash is stored; optional external timestamp anchor (Product Spec) not built | With the manifest export worker |
-| Manifest is stored in the DB only | Export to write-once storage + owner email is a worker job | Weeks 4–5 follow-up |
+| Manifest export not yet emailed to the owner | The nightly manifest is written to locked storage (step 1.1); the owner copy by email isn't built | Phase 1 notifications |
+| S3 Object Lock not yet exercised live | Adapter tested at the request level; needs the AWS account and a bucket with Object Lock | Phase 1 step 1.0 (accounts) |
+| Nightly schedule uses the UTC day | Business days are per location time zone (Toast) | Step 1.2 (Toast daily sales) |
+| Connectors have no console page or API routes yet | Created and run through the database functions and the worker | Step 1.2 (with the Toast connector) |
 | Audit chain serializes all postings in a tenant | Fine at restaurant volumes (~400/s measured per entity) | Revisit if a tenant exceeds it |
 | Reversing an intercompany pair | Needs a paired reversal function | Phase 1 |

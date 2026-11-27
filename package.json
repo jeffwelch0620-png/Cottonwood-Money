@@ -12,9 +12,11 @@
     "api": "tsx apps/api/main.ts",
     "dev:token": "tsx scripts/dev-token.ts",
     "dev:seed": "tsx scripts/dev-seed.ts",
-    "e2e:admin": "scripts/e2e-admin.sh"
+    "e2e:admin": "scripts/e2e-admin.sh",
+    "worker": "tsx apps/worker/main.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1178.0",
     "decimal.js": "^10.6.0",
     "fastify": "^5.12.8",
     "jose": "^6.2.18",

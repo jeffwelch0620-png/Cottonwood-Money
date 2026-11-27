@@ -127,3 +127,25 @@ create policy je_draft_read on ledger.je_draft for select to app_role
 drop policy if exists audit_event_read on audit.event;
 create policy audit_event_read on audit.event for select to app_role
   using (tenant_id = (select app.current_tenant()));
+
+-- 8. Integration (Phase 1 step 1.1): members read their tenant's connectors, jobs, runs and
+--    evidence records. connector_secret has no app_role grant and a deny-all policy: secrets
+--    are readable only through integration.read_secret, which app_role cannot execute.
+alter table integration.connector        enable row level security;
+alter table integration.connector_secret enable row level security;
+alter table integration.job              enable row level security;
+alter table integration.job_attempt      enable row level security;
+alter table integration.sync_run         enable row level security;
+alter table integration.evidence_object  enable row level security;
+
+do $$
+declare t text;
+begin
+  foreach t in array array['connector','job','job_attempt','sync_run','evidence_object'] loop
+    execute format('drop policy if exists %1$s_read on integration.%1$I', t);
+    execute format('create policy %1$s_read on integration.%1$I for select to app_role
+                      using (tenant_id = (select app.current_tenant()))', t);
+  end loop;
+end $$;
+drop policy if exists connector_secret_none on integration.connector_secret;
+create policy connector_secret_none on integration.connector_secret to app_role using (false) with check (false);
