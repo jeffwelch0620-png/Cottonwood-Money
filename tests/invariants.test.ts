@@ -141,12 +141,17 @@ describe('I3 - posting date must fall in an open period', () => {
 
   it('periods only move forward, and only seal_period can seal', async () => {
     await actAs(db, f.user1);
-    await expectCode(db.query(`update period set status = 'open' where id = $1`, [f.periods.octA]), 'PERIOD_BACKWARD');
-    await db.query(`update period set status = 'hard' where id = $1`, [f.periods.octA]);
+    await expect(db.query(`update period set status = 'hard' where id = $1`, [f.periods.octA])).rejects.toThrow(/permission denied/);
+    await expectCode(db.query(`select ledger.close_period($1, 'soft')`, [f.periods.octA]), 'PERIOD_BACKWARD');
+    await db.query(`select ledger.close_period($1, 'hard')`, [f.periods.octA]);
+    const su0 = await superClient();
+    await expectCode(su0.query(`update period set status = 'open' where id = $1`, [f.periods.octA]), 'PERIOD_BACKWARD');
     await expectCode(
-      db.query(`update period set status = 'sealed', seal_hash = '\\x00'::bytea where id = $1`, [f.periods.octA]),
+      su0.query(`update period set status = 'sealed', seal_hash = '\\x00'::bytea where id = $1`, [f.periods.octA]),
       'PERIOD_SEAL_DIRECT',
     );
+    await su0.end();
+    for (const id of f.monthsA.slice(0, 9)) await db.query('select ledger.seal_period($1)', [id]);
     await actAs(db, f.agent);
     await expectCode(db.query('select ledger.seal_period($1)', [f.periods.octA]), 'APPROVER_NOT_USER');
     await actAs(db, f.user1);

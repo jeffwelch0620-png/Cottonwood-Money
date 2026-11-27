@@ -20,6 +20,7 @@ alter table ledger.journal_line     enable row level security;
 alter table ledger.entry_evidence   enable row level security;
 alter table ledger.chain_manifest   enable row level security;
 alter table audit.event             enable row level security;
+alter table ledger.period_reopen    enable row level security;
 
 -- 2. ledger_owner reads/updates public tables (definer functions) -------------------------
 do $$
@@ -105,6 +106,10 @@ drop policy if exists chain_manifest_read on ledger.chain_manifest;
 create policy chain_manifest_read on ledger.chain_manifest for select to app_role
   using (exists (select 1 from public.entity e
                   where e.id = chain_manifest.entity_id and e.tenant_id = (select app.current_tenant())));
+
+drop policy if exists period_reopen_read on ledger.period_reopen;
+create policy period_reopen_read on ledger.period_reopen for select to app_role
+  using (tenant_id = (select app.current_tenant()));
 
 drop policy if exists audit_event_read on audit.event;
 create policy audit_event_read on audit.event for select to app_role

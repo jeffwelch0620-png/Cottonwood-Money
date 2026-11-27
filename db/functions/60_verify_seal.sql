@@ -86,6 +86,10 @@ begin
     raise exception 'ROLE_FORBIDDEN: only an owner or controller can seal a period';
   end if;
   perform pg_advisory_xact_lock(hashtextextended('ledger:' || pr.entity_id::text, 0));
+  if exists (select 1 from public.period
+              where entity_id = pr.entity_id and end_date < pr.start_date and status <> 'sealed') then
+    raise exception 'CLOSE_ORDER: every earlier period must be sealed first';
+  end if;
   select hash into h from ledger.journal_entry where entity_id = pr.entity_id order by seq desc limit 1;
   update public.period set status = 'sealed',
          seal_hash = coalesce(h, ledger.genesis_hash(pr.entity_id))

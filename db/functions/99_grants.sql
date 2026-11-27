@@ -10,6 +10,11 @@ grant execute on function ledger.reverse_entry(jsonb)       to app_role;
 grant execute on function ledger.verify_chain(uuid)         to app_role;
 grant execute on function ledger.take_manifest(uuid)        to app_role;
 grant execute on function ledger.seal_period(uuid)          to app_role;
+grant execute on function ledger.create_fiscal_year(uuid, int)    to app_role;
+grant execute on function ledger.close_period(uuid, text)         to app_role;
+grant execute on function ledger.request_reopen(uuid, text, text) to app_role;
+grant execute on function ledger.approve_reopen(uuid)             to app_role;
+grant execute on function ledger.reject_reopen(uuid)              to app_role;
 grant execute on function audit.verify_chain(uuid)          to app_role;
 -- Pure helper; lets external tools recompute chain starts.
 grant execute on function ledger.genesis_hash(uuid)         to app_role;

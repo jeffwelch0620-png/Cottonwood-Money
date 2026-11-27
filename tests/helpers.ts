@@ -81,6 +81,7 @@ export interface Fixture {
   locB1: string;
   acct: Record<'cash' | 'clearing' | 'ap' | 'sales' | 'cogs' | 'dueFrom' | 'dueTo' | 'inactive', string>;
   periods: Record<'sepA' | 'octA' | 'novA' | 'decA' | 'novB', string>;
+  monthsA: string[]; // entity A's FY2026 periods, Jan..Dec
   doc: string;
 }
 
@@ -145,18 +146,15 @@ export async function makeFixture(db: pg.ClientBase): Promise<Fixture> {
     inactive: await account('6999', 'Retired account', 'expense', 'D', 'settle', false, false),
   };
 
-  const period = (e: string, start: string, end: string) =>
-    one(`insert into period (tenant_id, entity_id, start_date, end_date) values ($1,$2,$3,$4) returning id`, [tenant, e, start, end]);
-  const periods = {
-    sepA: await period(entityA, '2026-09-01', '2026-09-30'),
-    octA: await period(entityA, '2026-10-01', '2026-10-31'),
-    novA: await period(entityA, '2026-11-01', '2026-11-30'),
-    decA: await period(entityA, '2026-12-01', '2026-12-31'),
-    novB: await period(entityB, '2026-11-01', '2026-11-30'),
-  };
-  await db.query(`update period set status = 'soft' where id = $1`, [periods.octA]);
-  await db.query(`update period set status = 'soft' where id = $1`, [periods.sepA]);
-  await db.query(`update period set status = 'hard' where id = $1`, [periods.sepA]);
+  // FY2026, calendar months, for both entities. Then Jan-Sep hard-closed and Oct soft-closed, in order.
+  await db.query('select ledger.create_fiscal_year($1, 2026)', [entityA]);
+  await db.query('select ledger.create_fiscal_year($1, 2026)', [entityB]);
+  const monthsA: string[] = (await db.query(
+    'select id from period where entity_id = $1 and fiscal_year = 2026 order by period_no', [entityA])).rows.map((r) => r.id);
+  const novB = await one(`select id from period where entity_id = $1 and start_date = '2026-11-01'`, [entityB]);
+  const periods = { sepA: monthsA[8], octA: monthsA[9], novA: monthsA[10], decA: monthsA[11], novB };
+  for (const id of monthsA.slice(0, 9)) await db.query(`select ledger.close_period($1, 'hard')`, [id]);
+  await db.query(`select ledger.close_period($1, 'soft')`, [periods.octA]);
 
   const doc = await one(
     `insert into source_document (tenant_id, doc_type, storage_uri, sha256) values ($1,'pos_eod',$2,$3) returning id`,
@@ -166,7 +164,7 @@ export async function makeFixture(db: pg.ClientBase): Promise<Fixture> {
   await member(clerkAuth, 'bookkeeper', { location_ids: [locA1], approval_limit: '1000' });
   const clerk = await principal('user', 'Store 1 bookkeeper', clerkAuth);
 
-  return { tenant, user1, user2, agent, integration, clerk, viewer, entityA, entityB, locA1, locA2, locB1, acct, periods, doc };
+  return { tenant, user1, user2, agent, integration, clerk, viewer, entityA, entityB, locA1, locA2, locB1, acct, periods, monthsA, doc };
 }
 
 /** A valid daily-sales entry for entity A; override any field. */

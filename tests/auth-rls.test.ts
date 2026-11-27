@@ -29,6 +29,8 @@ beforeAll(async () => {
     { account_id: a.acct.sales, location_id: a.locA2, credit: '40' },
   ] }));
   await db.query('select ledger.take_manifest($1)', [a.entityA]);
+  await actAs(db, a.user1);
+  await db.query(`select ledger.request_reopen($1, 'soft', 'isolation fixture')`, [a.periods.sepA]);
   await post(db, dsj(b));
 });
 afterAll(async () => {
@@ -217,8 +219,8 @@ describe('gap 3: seal_period and approvals take the actor from the session', () 
   it('records the session user as the sealer; refuses agents, bookkeepers and other tenants', async () => {
     const f = await makeFixture(db);
     await actAs(db, f.user1);
-    await db.query(`update period set status = 'soft' where id = $1`, [f.periods.octA]);
-    await db.query(`update period set status = 'hard' where id = $1`, [f.periods.octA]);
+    await db.query(`select ledger.close_period($1, 'hard')`, [f.periods.octA]);
+    for (const id of f.monthsA.slice(0, 9)) await db.query('select ledger.seal_period($1)', [id]);
     await actAs(db, f.agent);
     await expectCode(db.query('select ledger.seal_period($1)', [f.periods.octA]), 'APPROVER_NOT_USER');
     await actAs(db, f.clerk);

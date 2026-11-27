@@ -52,14 +52,23 @@ Step 5 decisions (approved by owner 2026-11-27):
 - Agents cannot post even their own entries; whoever posts an agent's entry becomes its approver.
 - The DB trusts claims set by the app (Supabase model), not in-DB JWT verification.
 
-## Next: Phase 0 step 6 — fiscal calendars (4-4-5, 13-period)
-- Then steps 7–10 per the Phase 0 Build Spec §10 (cash/accrual views + reports, admin
-  console, 1M-entry run + CPA review, exit gate).
+Step 6 done (2026-11-27): migration 0007 + `db/functions/70_periods.sql`. Fiscal years are
+generated per entity (calendar month / 4-4-5 / 13-period, 52/53-week rule nearest or last);
+close is forward-only and in date order; two-person reopen, never for sealed periods.
+96/96 tests pass; ~419 posts/s. See README "Fiscal calendars and close".
+
+## Next: Phase 0 step 7 (weeks 7–8)
+payment_application, cash/accrual views, trial balance, P&L and balance sheet API;
+cash/accrual suite green. Then steps 8–10 per Build Spec §10 (admin console, 1M-entry run +
+CPA review, exit gate).
 
 ## Test conventions (step 5+)
 - Every app_role session needs claims: `actAs(db, principalId)` in tests; `withSession()` in app code.
 - `post(db, entry, as?)` acts as `as`, else the entry's approver, else its creator.
 - RLS filters silently: an UPDATE from the wrong role affects 0 rows, not an error. Assert rowCount.
+- Fixtures: FY2026 calendar months for both entities; entity A Jan–Sep hard, Oct soft (`f.monthsA`).
+  Periods change only via ledger.close_period / seal_period / reopen functions.
+- Race tests must prove the race happened (both outcomes observed), not just pass.
 
 ## Working style for this owner
 Logic first, short explanations, show the math in summary form, diagrams welcome.
