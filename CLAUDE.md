@@ -17,9 +17,9 @@ audit-grade records. Generic product first; the owner's own group is configured 
 - Stack: TypeScript modular monolith, PostgreSQL (Supabase), Render; S3-style object-locked evidence storage.
 
 ## Non-negotiable rules
-1. The database enforces the books. App role may only EXECUTE `ledger.post_entry`,
-   `post_intercompany`, `reverse_entry` (+ verify/manifest/seal). Never grant it
-   INSERT/UPDATE/DELETE on `ledger.*` or `audit.*`.
+1. The database enforces the books. App role may only EXECUTE the ledger functions
+   (`post_entry`, `post_intercompany`, `propose_entry`/`approve_draft`, `request_reversal`,
+   period, payment and report functions). Never grant it INSERT/UPDATE/DELETE on `ledger.*` or `audit.*`.
 2. Posted rows are never updated or deleted. Corrections are reversals (two-person approval).
 3. Agents propose, never post or approve. Approvers must be principals of kind `user`.
 4. Money: `Decimal` in TS, `NUMERIC(19,4)` in SQL. Never JS numbers.
@@ -89,6 +89,8 @@ the COA template, close rules and reversal policy. Then step 10: exit-gate revie
 - Race tests must prove the race happened (both outcomes observed), not just pass.
 - New tenant tables must be seeded in auth-rls.test.ts beforeAll (the isolation guard needs rows).
 - API tests: `buildServer` + `app.inject` with HS256 tokens (tests/api.test.ts `as(fx, principal)`).
+- Two people = two sessions: a different creator is only accepted through `approve_draft`
+  (`_post`'s `p_draft`); `post()` in tests routes caller≠creator through propose → approve.
 - Console: client components only; `useApi` keys results by path; money via lib/money (Decimal).
   Run servers with setsid and kill the process group (next-server outlives npx).
 

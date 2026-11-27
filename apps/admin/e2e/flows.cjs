@@ -58,6 +58,20 @@ const assert = (c, m) => { if (!c) throw new Error('ASSERT: ' + m); console.log(
   assert(/matches recomputed hash/.test(await owner.locator('.card', { has: owner.getByRole('heading', { name: 'Integrity', exact: true }) }).innerText()), 'viewer: hash verified');
   await owner.screenshot({ path: S + '/shots/flow-posted-entry.png', fullPage: true });
 
+  console.log('4b. Reversal: controller requests, owner approves');
+  await go(ctrl, '/journal');
+  await ctrl.locator('tr', { hasText: 'Accrue walk-in cooler repair' }).locator('a').first().click();
+  await ctrl.waitForLoadState('networkidle'); await ctrl.waitForTimeout(300);
+  await ctrl.getByRole('button', { name: 'Request reversal' }).click();
+  await ctrl.waitForURL('**/approvals'); await ctrl.waitForTimeout(500);
+  assert(await draftCard(ctrl, 'Reversal of entry').getByRole('button', { name: 'Approve and post' }).isDisabled(), 'requester cannot approve own reversal');
+  await go(owner, '/approvals');
+  await draftCard(owner, 'Reversal of entry').getByRole('button', { name: 'Approve and post' }).click();
+  await owner.waitForTimeout(800);
+  assert(await draftCard(owner, 'Reversal of entry').count() === 0, 'owner approved the reversal');
+  await go(owner, '/journal');
+  assert(/reversal ↩/.test(await owner.locator('tbody tr').first().innerText()), 'reversal posted at the top of the journal');
+
   console.log('5. Close and two-person reopen');
   await go(ctrl, '/periods');
   const oct = ctrl.locator('tr', { hasText: 'P10' });

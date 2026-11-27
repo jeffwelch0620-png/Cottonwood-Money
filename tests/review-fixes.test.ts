@@ -35,13 +35,20 @@ describe('review: reversed payments must not keep settling documents', () => {
     const bill = await entry(fx, 'ap_bill', '2026-11-03', [[fx.acct.cogs, '100', 0], [fx.acct.ap, 0, '100']]);
     const pay = await entry(fx, 'ap_payment', '2026-11-04', [[fx.acct.ap, '100', 0], [fx.acct.cash, 0, '100']]);
     const a = await apply(fx, pay.id, bill.id, '100');
-    await actAs(db, fx.user2);
-    const rev = (id: string) => db.query('select ledger.reverse_entry($1::jsonb)', [JSON.stringify({ entry_id: id, created_by: fx.user1, idempotency_key: randomUUID() })]);
+    // Requested by user1, approved by user2: the ledger refuses at approval while applications are live.
+    const rev = async (id: string) => {
+      await actAs(db, fx.user1);
+      const d = (await db.query('select ledger.request_reversal($1::jsonb) id', [JSON.stringify({ entry_id: id })])).rows[0].id;
+      await actAs(db, fx.user2);
+      return db.query('select ledger.approve_draft($1)', [d]).finally(async () => {
+        await actAs(db, fx.user2);
+        await db.query(`select ledger.reject_draft($1, 'test cleanup')`, [d]).catch(() => undefined);
+      });
+    };
     await expectCode(rev(pay.id), 'HAS_APPLICATIONS');
     await expectCode(rev(bill.id), 'HAS_APPLICATIONS');
     await actAs(db, fx.integration);
     await db.query('select ledger.unapply_payment($1)', [a.id]);
-    await actAs(db, fx.user2);
     await rev(pay.id); // allowed once unapplied
     await expectCode(apply(fx, pay.id, bill.id, '100'), 'ENTRY_REVERSED');
   });

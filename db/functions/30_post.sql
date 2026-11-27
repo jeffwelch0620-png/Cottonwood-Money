@@ -6,7 +6,10 @@
 -- Errors are raised as 'CODE: detail' so the application can map them to typed errors.
 set role ledger_owner;
 
-create or replace function ledger._post(p jsonb, p_ic_group uuid default null)
+-- p_draft: set only by ledger.approve_draft (app_role cannot call _post), proving the creator
+-- proposed this entry in their own session. Without it, the caller must be the creator.
+drop function if exists ledger._post(jsonb, uuid);
+create or replace function ledger._post(p jsonb, p_ic_group uuid default null, p_draft uuid default null)
 returns ledger.journal_entry
 language plpgsql security definer set search_path = pg_catalog, public, pg_temp as $$
 declare
@@ -128,6 +131,13 @@ begin
     end if;
     e.approved_by := null;
   else
+    -- Naming someone else as creator is only possible for a draft they proposed themselves.
+    if p_draft is null then
+      raise exception 'CREATOR_NOT_CALLER: post as yourself, or have % propose a draft for approval', e.created_by;
+    end if;
+    if not exists (select 1 from ledger.je_draft where id = p_draft and created_by = e.created_by and state = 'pending') then
+      raise exception 'CREATOR_NOT_CALLER: draft % was not proposed by the named creator', p_draft;
+    end if;
     if nullif(p->>'approved_by', '') is not null and (p->>'approved_by')::uuid <> v_caller then
       raise exception 'APPROVER_NOT_CALLER: approval must be given in the approver''s own session';
     end if;
@@ -218,7 +228,9 @@ begin
   -- 7. Evidence (I5) -------------------------------------------------------------------
   v_ev := array(select distinct x::uuid
                   from jsonb_array_elements_text(coalesce(p->'evidence_ids', '[]'::jsonb)) x);
-  if v_src not in ('manual', 'opening') and cardinality(v_ev) = 0 then
+  -- A reversal cites exactly its original's documents (checked in step 8), which may be none for
+  -- a manual or opening entry.
+  if v_src not in ('manual', 'opening', 'reversal') and cardinality(v_ev) = 0 then
     raise exception 'NO_EVIDENCE: % entries must cite at least one source document', v_src;
   end if;
   if (select count(*) from public.source_document where tenant_id = v_tenant and id = any(v_ev))
@@ -255,6 +267,12 @@ begin
           except all
           select account_id, location_id, debit, credit, dims from ledger.journal_line where entry_id = v_orig.id)) then
       raise exception 'REVERSAL_MISMATCH: reversal lines must mirror the original exactly';
+    end if;
+    if exists ((select source_document_id from ledger.entry_evidence where entry_id = v_orig.id
+                except select unnest(v_ev))
+               union all
+               (select unnest(v_ev) except select source_document_id from ledger.entry_evidence where entry_id = v_orig.id)) then
+      raise exception 'REVERSAL_MISMATCH: a reversal cites exactly the original''s source documents';
     end if;
     e.reverses_id := v_orig.id;
   elsif p->>'reverses_id' is not null then

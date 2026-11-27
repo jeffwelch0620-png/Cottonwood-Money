@@ -6,7 +6,7 @@ revoke execute on all functions in schema app    from public;
 
 grant execute on function ledger.post_entry(jsonb)          to app_role;
 grant execute on function ledger.post_intercompany(jsonb)   to app_role;
-grant execute on function ledger.reverse_entry(jsonb)       to app_role;
+grant execute on function ledger.request_reversal(jsonb)    to app_role;
 grant execute on function ledger.verify_chain(uuid)         to app_role;
 grant execute on function ledger.take_manifest(uuid)        to app_role;
 grant execute on function ledger.seal_period(uuid)          to app_role;

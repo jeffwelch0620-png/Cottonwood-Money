@@ -253,6 +253,14 @@ end $$;
 -- Payment application
 -- ---------------------------------------------------------------------------------------------
 
+-- True when every line's location_id is inside the caller's location scope (or the caller has none).
+create or replace function ledger._lines_in_scope(p_lines jsonb) returns boolean
+language sql stable security definer set search_path = pg_catalog, public, pg_temp as $$
+  select app.allowed_locations() is null
+      or not exists (select 1 from jsonb_array_elements(coalesce(p_lines, '[]'::jsonb)) l
+                      where not ((l->>'location_id')::uuid = any(app.allowed_locations())))
+$$;
+
 -- Caller rules for posting-like actions: verified member, not a viewer, has a principal, not an agent.
 create or replace function ledger._poster() returns uuid
 language plpgsql stable security definer set search_path = pg_catalog, public, pg_temp as $$
@@ -325,6 +333,10 @@ begin
   end if;
   if pay.id = doc.id then
     raise exception 'BAD_INPUT: an entry cannot settle itself';
+  end if;
+  if not ledger._lines_in_scope((select jsonb_agg(jsonb_build_object('location_id', location_id))
+                                   from ledger.journal_line where entry_id in (pay.id, doc.id))) then
+    raise exception 'LOCATION_NOT_PERMITTED: the payment or document has lines outside your location scope';
   end if;
   perform pg_advisory_xact_lock(hashtextextended('ledger:' || doc.entity_id::text, 0));
 
@@ -402,6 +414,10 @@ begin
   end if;
   if pa.amount < 0 then
     raise exception 'BAD_INPUT: an un-application cannot itself be undone; apply again instead';
+  end if;
+  if not ledger._lines_in_scope((select jsonb_agg(jsonb_build_object('location_id', location_id))
+                                   from ledger.journal_line where entry_id in (pa.payment_entry_id, pa.document_entry_id))) then
+    raise exception 'LOCATION_NOT_PERMITTED: the payment or document has lines outside your location scope';
   end if;
   perform pg_advisory_xact_lock(hashtextextended('ledger:' || pa.entity_id::text, 0));
   perform ledger._settlement_period_open(pa.entity_id, pa.settled_on, p_allow_soft_close);

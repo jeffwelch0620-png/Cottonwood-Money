@@ -198,7 +198,7 @@ describe('gap 1: post_entry checks input.tenant_id = app.current_tenant()', () =
     await expectCode(db.query('select * from ledger.verify_chain($1)', [b.entityA]), 'UNKNOWN_ENTITY');
     await expectCode(db.query('select ledger.take_manifest($1)', [b.entityA]), 'UNKNOWN_ENTITY');
     await expectCode(db.query('select * from audit.verify_chain($1)', [b.tenant]), 'TENANT_MISMATCH');
-    await expectCode(db.query('select ledger.reverse_entry($1::jsonb)', [JSON.stringify({ entry_id: bEntry, created_by: a.user1 })]), 'REVERSAL_LINK');
+    await expectCode(db.query('select ledger.request_reversal($1::jsonb)', [JSON.stringify({ entry_id: bEntry })]), 'REVERSAL_LINK');
   });
 });
 
@@ -247,17 +247,19 @@ describe('gap 3: seal_period and approvals take the actor from the session', () 
   it('the approver is the session user; a claimed approver who is not the caller is refused', async () => {
     await actAs(db, a.user1);
     await expectCode(db.query('select ledger.post_entry($1::jsonb)', [JSON.stringify(manual(a, { approved_by: a.user2 }))]), 'APPROVER_NOT_CALLER');
-    await actAs(db, a.clerk);
-    await expectCode(db.query('select ledger.post_entry($1::jsonb)', [JSON.stringify(manual(a, { approved_by: a.user2 }))]), 'APPROVER_NOT_CALLER');
+    await actAs(db, a.clerk); // naming user1 as creator from clerk's session: refused before any approval logic
+    await expectCode(db.query('select ledger.post_entry($1::jsonb)', [JSON.stringify(manual(a, { approved_by: a.user2 }))]), 'CREATOR_NOT_CALLER');
     const r = await post(db, manual(a), a.user2); // no approved_by in input: derived
     const { rows } = await db.query('select approved_by from ledger.journal_entry where id = $1', [r.id]);
     expect(rows[0].approved_by).toBe(a.user2);
   });
 
-  it('reverse_entry derives the approver from the session', async () => {
+  it('a reversal records the requester (their own session) and the approver (another session)', async () => {
     const orig = await post(db, dsj(a));
+    await actAs(db, a.user1);
+    const d = (await db.query('select ledger.request_reversal($1::jsonb) id', [JSON.stringify({ entry_id: orig.id })])).rows[0].id;
     await actAs(db, a.user2);
-    const { rows } = await db.query('select ledger.reverse_entry($1::jsonb) r', [JSON.stringify({ entry_id: orig.id, created_by: a.user1 })]);
+    const { rows } = await db.query('select ledger.approve_draft($1) r', [d]);
     const e = await db.query('select created_by, approved_by from ledger.journal_entry where id = $1', [rows[0].r.id]);
     expect(e.rows[0]).toEqual({ created_by: a.user1, approved_by: a.user2 });
   });

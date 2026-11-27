@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { jwtVerify, createRemoteJWKSet, type JWTPayload } from 'jose';
 import { z } from 'zod';
 import { withSession, type PreTenantClaims } from '../../modules/auth/index.js';
-import { LedgerError, toLedgerError, postEntry, reverseEntry, applyPayment, unapplyPayment, verifyChain } from '../../modules/ledger/index.js';
+import { LedgerError, toLedgerError, postEntry, requestReversal, applyPayment, unapplyPayment, verifyChain } from '../../modules/ledger/index.js';
 import { trialBalance, profitAndLoss, balanceSheet, cashAccrualTieOut, type Basis } from '../../modules/reporting/index.js';
 
 export interface ServerConfig {
@@ -35,7 +35,7 @@ const STATUS: Array<[RegExp, number]> = [
   [/^(NOT_AUTHENTICATED|MFA_REQUIRED)$/, 401],
   [/^(ROLE_FORBIDDEN|AGENT_CANNOT_POST|APPROVER_NOT_USER|APPROVER_NOT_CALLER|SELF_APPROVAL|SOFT_CLOSE_FORBIDDEN|APPROVAL_LIMIT|LOCATION_NOT_PERMITTED|TENANT_MISMATCH|NO_PRINCIPAL|MEMBERSHIP_KIND_MISMATCH|CREATOR_NOT_CALLER|CREATOR_NOT_MEMBER)$/, 403],
   [/^(UNKNOWN_\w+|NO_PERIOD|NO_DRAFT|NO_REQUEST|NOT_FOUND)$/, 404],
-  [/^(IDEMPOTENCY_CONFLICT|REQUEST_DECIDED|ALREADY_\w+|REOPEN_\w+|LAST_OWNER|PERIOD_\w+|CLOSE_ORDER|FISCAL_YEAR_\w+|CALENDAR_FIXED|\w*IMMUTABLE)$/, 409],
+  [/^(IDEMPOTENCY_CONFLICT|REQUEST_DECIDED|ALREADY_\w+|REOPEN_\w+|REVERSAL_PENDING|HAS_APPLICATIONS|ENTRY_REVERSED|BACKFILL_CLOSED|LAST_OWNER|PERIOD_\w+|CLOSE_ORDER|FISCAL_YEAR_\w+|CALENDAR_FIXED|\w*IMMUTABLE)$/, 409],
 ];
 const statusFor = (code: string) => STATUS.find(([re]) => re.test(code))?.[1] ?? 422;
 
@@ -284,8 +284,9 @@ export async function buildServer(cfg: ServerConfig): Promise<FastifyInstance> {
   });
   route('GET', '/v1/entries/:id', async (db, req) => (await one(db, 'select ledger.entry_detail($1) d', [param(req)])).d);
   route('POST', '/v1/entries', async (db, req) => postEntry(db, req.body as Parameters<typeof postEntry>[1]));
-  route('POST', '/v1/entries/:id/reverse', async (db, req, b) => reverseEntry(db, { ...b, entry_id: param(req) }),
-    z.object({ created_by: uuid, entry_date: date.optional(), memo: z.string().optional(), idempotency_key: z.string().optional() }));
+  // Requests a reversal (a draft by the caller); a different person approves it in /v1/drafts.
+  route('POST', '/v1/entries/:id/reverse', async (db, req, b) => requestReversal(db, { ...b, entry_id: param(req) }),
+    z.object({ entry_date: date.optional(), memo: z.string().optional() }));
   route('POST', '/v1/payment-applications', async (db, _r, b) => applyPayment(db, b.payment_entry_id, b.document_entry_id, b.amount, b.allow_soft_close),
     z.object({ payment_entry_id: uuid, document_entry_id: uuid, amount: z.string().regex(/^\d+(\.\d{1,4})?$/), allow_soft_close: z.boolean().default(false) }));
   route('POST', '/v1/payment-applications/:id/unapply', async (db, req, b) => unapplyPayment(db, param(req), b.allow_soft_close),

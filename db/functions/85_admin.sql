@@ -97,7 +97,7 @@ begin
   -- _post derives the approver from the session (caller <> creator => approver = caller) and
   -- enforces person-only approval, approval limit, location scope, period and every invariant.
   e := ledger._post(d.payload || jsonb_build_object('idempotency_key', 'draft:' || d.id::text,
-                                                    'allow_soft_close', coalesce(p_allow_soft_close, false)), null);
+                                                    'allow_soft_close', coalesce(p_allow_soft_close, false)), null, d.id);
   update ledger.je_draft set state = 'posted', decided_by = v_caller, decided_at = now(), entry_id = e.id
    where id = d.id;
   perform audit.append(d.tenant_id, 'user', v_caller, 'draft.approve', 'je_draft', d.id,
@@ -121,6 +121,9 @@ begin
   end if;
   if coalesce(trim(p_reason), '') = '' then
     raise exception 'MISSING_FIELD: a rejection needs a reason';
+  end if;
+  if not ledger._lines_in_scope(d.payload->'lines') then
+    raise exception 'LOCATION_NOT_PERMITTED: this draft has lines outside your location scope';
   end if;
   select kind into v_kind from public.principal where id = v_caller;
   -- The proposer may withdraw; otherwise a person who can approve entries (not a viewer).

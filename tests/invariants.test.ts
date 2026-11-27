@@ -186,7 +186,7 @@ describe('I5 - evidence and approvals', () => {
   });
 
   it('the declared actor type must match the principal', async () => {
-    await expectCode(post(db, dsj(f, { actor_type: 'user', created_by: f.agent }), f.user1), 'ACTOR_MISMATCH');
+    await expectCode(post(db, dsj(f, { actor_type: 'user' })), 'ACTOR_MISMATCH'); // the integration claiming to be a user
   });
 
   it('an agent can create (with evidence) but never post; the person who posts it is the approver', async () => {
@@ -277,38 +277,47 @@ describe('I7 - numbering, hash chain and reversals', () => {
 
   it('reverses an entry exactly once, with two-person approval', async () => {
     const orig = await post(db, dsj(f));
-    const rev = (over: object = {}) =>
-      db.query('select ledger.reverse_entry($1::jsonb) as r', [
-        JSON.stringify({ entry_id: orig.id, created_by: f.user1, approved_by: f.user2, ...over }),
-      ]);
-    await actAs(db, f.user1);
-    await expectCode(rev({ approved_by: f.user1, idempotency_key: `x:${randomUUID()}` }), 'SELF_APPROVAL');
+    const request = async (id: string, as = f.user1) => {
+      await actAs(db, as);
+      return (await db.query('select ledger.request_reversal($1::jsonb) id', [JSON.stringify({ entry_id: id })])).rows[0].id as string;
+    };
+    const d = await request(orig.id);
+    await expectCode(db.query('select ledger.approve_draft($1)', [d]), 'SELF_APPROVAL');
     await actAs(db, f.user2);
-    await expectCode(rev({ approved_by: f.clerk, idempotency_key: `x:${randomUUID()}` }), 'APPROVER_NOT_CALLER');
-    const { rows } = await rev();
-    const r = rows[0].r;
+    const r = (await db.query('select ledger.approve_draft($1) r', [d])).rows[0].r;
     const net = await db.query(
       `select sum(debit - credit)::text n from ledger.journal_line where entry_id = any($1::uuid[])`,
       [[orig.id, r.id]],
     );
     expect(net.rows[0].n).toBe('0.0000');
-    await expectCode(rev({ idempotency_key: `again:${randomUUID()}` }), 'ALREADY_REVERSED');
-    await expectCode(
-      db.query('select ledger.reverse_entry($1::jsonb)', [JSON.stringify({ entry_id: r.id, created_by: f.user1, approved_by: f.user2 })]),
-      'REVERSAL_LINK',
-    );
+    await expectCode(request(orig.id), 'ALREADY_REVERSED');
+    await expectCode(request(r.id), 'REVERSAL_LINK');
   });
 
-  it('rejects a hand-built "reversal" whose lines do not mirror the original', async () => {
+  it('a "reversal" can only come from a reversal request, and its lines must mirror the original', async () => {
     const orig = await post(db, dsj(f));
     const fake = dsj(f, {
-      source_type: 'reversal', reverses_id: orig.id, actor_type: 'user', created_by: f.user1, approved_by: f.user2,
+      source_type: 'reversal', reverses_id: orig.id, actor_type: 'user', created_by: f.user1,
       lines: [
         { account_id: f.acct.sales, location_id: f.locA1, debit: '1.0000' },
         { account_id: f.acct.clearing, location_id: f.locA1, credit: '1.0000' },
       ],
     });
-    await expectCode(post(db, fake), 'REVERSAL_MISMATCH');
+    await expectCode(post(db, fake), 'APPROVAL_REQUIRED'); // posted directly by its creator
+    await actAs(db, f.user1);
+    const { evidence_ids: _e, idempotency_key: _k, created_by: _c, actor_type: _t, ...draft } = fake as Record<string, unknown>;
+    await expectCode(db.query('select ledger.propose_entry($1::jsonb)', [JSON.stringify(draft)]), 'BAD_SOURCE_TYPE');
+    // Backstop: even a reversal draft whose payload a superuser tampered with is refused at approval.
+    const d = (await db.query('select ledger.request_reversal($1::jsonb) id', [JSON.stringify({ entry_id: orig.id })])).rows[0].id;
+    const su = await superClient();
+    await su.query('begin');
+    await su.query('set local session_replication_role = replica');
+    // Still balanced, but line 1 now hits cash instead of mirroring the original's clearing line.
+    await su.query(`update ledger.je_draft set payload = jsonb_set(payload, '{lines,0,account_id}', to_jsonb($2::text)) where id = $1`, [d, f.acct.cash]);
+    await su.query('commit');
+    await su.end();
+    await actAs(db, f.user2);
+    await expectCode(db.query('select ledger.approve_draft($1)', [d]), 'REVERSAL_MISMATCH');
   });
 
   it('app_role cannot call the internal posting function', async () => {

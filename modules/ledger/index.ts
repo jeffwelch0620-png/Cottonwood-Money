@@ -85,13 +85,23 @@ export async function postEntry(db: ClientBase, input: PostEntryInput): Promise<
   }
 }
 
-export async function reverseEntry(
-  db: ClientBase,
-  // The approver is the session's user; approved_by, if given, must match it.
-  input: { entry_id: string; created_by: string; approved_by?: string; entry_date?: string; idempotency_key?: string; memo?: string },
-): Promise<PostResult> {
+/**
+ * Requests a reversal: saves the mirror-image entry as a draft proposed by the caller. A different
+ * person approves it (ledger.approve_draft) to post it.
+ */
+export async function requestReversal(db: ClientBase, input: { entry_id: string; entry_date?: string; memo?: string }): Promise<{ draft_id: string }> {
   try {
-    const { rows } = await db.query('select ledger.reverse_entry($1::jsonb) as r', [JSON.stringify(input)]);
+    const { rows } = await db.query('select ledger.request_reversal($1::jsonb) as id', [JSON.stringify(input)]);
+    return { draft_id: rows[0].id };
+  } catch (err) {
+    throw toLedgerError(err);
+  }
+}
+
+/** Approves a draft (posting it). The caller must not be its proposer. */
+export async function approveDraft(db: ClientBase, draftId: string, allowSoftClose = false): Promise<PostResult & { draft_id: string }> {
+  try {
+    const { rows } = await db.query('select ledger.approve_draft($1, $2) as r', [draftId, allowSoftClose]);
     const r = rows[0].r;
     return { ...r, seq: Number(r.seq) };
   } catch (err) {

@@ -91,7 +91,9 @@ JWT (sub, tenant_id, aal) ─► app.current_member()   membership: user_id = au
 
 post_entry:  input.tenant_id ≠ session tenant          → TENANT_MISMATCH
              allow_soft_close from non-owner/controller → SOFT_CLOSE_FORBIDDEN
-             caller = creator → no approver;  caller ≠ creator → approver = caller
+             caller = creator → no approver
+             caller ≠ creator → only via approve_draft of the creator's own draft
+                                (otherwise CREATOR_NOT_CALLER); approver = caller
              approved_by in input ≠ caller             → APPROVER_NOT_CALLER
              caller is an agent                        → AGENT_CANNOT_POST
              line outside caller's location_ids        → LOCATION_NOT_PERMITTED
@@ -158,7 +160,8 @@ largest settle line, so a fully settled document re-dates exactly its own amount
 ## Admin layer (step 8a)
 
 ```
-propose_entry (any member but viewers; agents too) → je_draft (pending, immutable)
+propose_entry (any member but viewers; agents too)  ┐
+request_reversal (a person; mirror of an entry)      ┘→ je_draft (pending, immutable)
       └─ approve_draft by a different person ─→ ledger._post (every rule re-checked) → posted
       └─ reject_draft (reviewer with a reason, or the proposer withdrawing)
 membership change → audit event {field: {from, to}}; last active owner can't be demoted (LAST_OWNER)
@@ -171,6 +174,10 @@ entity / location / account / principal insert or update → audit event with ac
 - `audit.export(from, to)`: owner/controller; events with actor names plus full-chain verification.
   The API serves JSONL or CSV with `x-audit-chain-ok` and `x-export-sha256` headers.
 - `account.cash_view` is fixed once an account has postings (it would rewrite cash-basis history).
+- Location scope covers writes beyond posting: payment application/unapplication, draft visibility
+  and rejection, and reversal requests all require every line to be in the member's stores.
+- A reversal cites exactly its original's source documents (none for manual/opening entries) and
+  is refused while the original still has payment applications (`HAS_APPLICATIONS`).
 - API: `/v1/me`, tenants, entities, locations, members, accounts, COA template, periods + fiscal years +
   close/seal/reopen, drafts, entries (list, viewer, post, reverse), payment applications, source
   documents, reports, chain verify, audit export. Error codes map to 400/401/403/404/409/422.

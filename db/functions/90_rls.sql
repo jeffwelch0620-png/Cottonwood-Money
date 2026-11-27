@@ -119,7 +119,10 @@ create policy payment_application_read on ledger.payment_application for select 
 
 drop policy if exists je_draft_read on ledger.je_draft;
 create policy je_draft_read on ledger.je_draft for select to app_role
-  using (tenant_id = (select app.current_tenant()));
+  using (tenant_id = (select app.current_tenant())
+         and ((select app.allowed_locations()) is null
+              or not exists (select 1 from jsonb_array_elements(payload->'lines') l
+                              where not ((l->>'location_id')::uuid = any((select app.allowed_locations())::uuid[])))));
 
 drop policy if exists audit_event_read on audit.event;
 create policy audit_event_read on audit.event for select to app_role

@@ -82,31 +82,22 @@ export default function EntryViewer() {
 }
 
 function Reverse({ entry, onDone }: { entry: any; onDone: () => void }) {
-  const { me, can } = useSession();
+  const { can } = useSession();
   const router = useRouter();
-  const members = useApi<any[]>('/v1/members');
   const act = useAction();
-  const [requester, setRequester] = useState('');
   const [date, setDate] = useState('');
-  const people = (members.data ?? []).filter((m) => m.kind === 'user' && m.active && m.principal_id !== me?.principal_id);
   if (!can('owner', 'controller', 'bookkeeper', 'manager')) return null;
   return (
     <Card title="Reverse this entry">
-      <p className="muted small">Two people: the requester (below) and you as approver. The reversal mirrors every line and posts on the date you choose (an open period).</p>
+      <p className="muted small">You request the reversal; a different person approves it in Approvals. It mirrors every line and posts on the date you choose (an open period).</p>
       <div className="row">
-        <Field label="Requested by">
-          <select className="input" value={requester} onChange={(e) => setRequester(e.target.value)}>
-            <option value="">Choose a person…</option>
-            {people.map((m) => <option key={m.principal_id} value={m.principal_id}>{m.name} ({m.role})</option>)}
-          </select>
-        </Field>
         <Field label="Reversal date (blank = original)"><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
-        <Button variant="danger" disabled={act.busy || !requester}
+        <Button variant="danger" disabled={act.busy}
           onClick={() => act.run(async () => {
-            const r = await api('POST', `/v1/entries/${entry.id}/reverse`, { created_by: requester, ...(date ? { entry_date: date } : {}) });
+            await api('POST', `/v1/entries/${entry.id}/reverse`, date ? { entry_date: date } : {});
             onDone();
-            router.push(`/journal/${r.id}`);
-          })}>Post reversal</Button>
+            router.push('/approvals');
+          })}>Request reversal</Button>
       </div>
       <ErrorNote error={act.error} />
     </Card>

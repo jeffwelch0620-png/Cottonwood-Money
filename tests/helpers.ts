@@ -208,8 +208,17 @@ export function dsj(f: Fixture, over: Record<string, unknown> = {}) {
  * the approver's own session), else its creator.
  */
 export async function post(db: pg.ClientBase, entry: unknown, as?: string) {
-  const e = entry as { approved_by?: string; created_by?: string };
+  const e = entry as Record<string, any>;
   const caller = as ?? e.approved_by ?? e.created_by;
+  // Two people (caller is not the creator): the creator proposes a draft in their own session and
+  // the caller approves it, which is the only way the ledger accepts a different creator.
+  if (caller && e.created_by && caller !== e.created_by && actors.has(caller) && actors.has(e.created_by)) {
+    const { approved_by: _a, allow_soft_close, created_by: _c, actor_type: _t, idempotency_key: _k, ...draft } = e;
+    await actAs(db, e.created_by);
+    const d = (await db.query('select ledger.propose_entry($1::jsonb) id', [JSON.stringify(draft)])).rows[0].id;
+    await actAs(db, caller);
+    return (await db.query('select ledger.approve_draft($1, $2) r', [d, Boolean(allow_soft_close)])).rows[0].r as { id: string; seq: number; hash: string; entity_id: string };
+  }
   if (caller && actors.has(caller)) await actAs(db, caller);
   const { rows } = await db.query('select ledger.post_entry($1::jsonb) as r', [JSON.stringify(entry)]);
   return rows[0].r as { id: string; seq: number; hash: string; entity_id: string };
