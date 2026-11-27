@@ -63,7 +63,6 @@ strict (reopen later periods first).
 Step 7 done (2026-11-27): migration 0008 + `db/functions/80_cash_reports.sql` +
 `modules/reporting`. Cash view per spec §7 with the document math in README "Cash/accrual views";
 reports take basis and echo it; tie-out to the cent. 115/115 tests; ~433 posts/s.
-Pending owner review: unapplied payments stay visible in AP/AR on the cash basis.
 
 Step 7 decision (approved 2026-11-27): unapplied payments stay visible in AP/AR on the cash basis.
 
