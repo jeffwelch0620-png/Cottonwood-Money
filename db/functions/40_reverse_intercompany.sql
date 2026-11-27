@@ -56,6 +56,7 @@ begin
   select coalesce(jsonb_agg(v.source_document_id), '[]'::jsonb) into ev
     from ledger.entry_evidence v where v.entry_id = o.id;
 
+  begin
   insert into ledger.je_draft (tenant_id, entity_id, payload, created_by)
   values (o.tenant_id, o.entity_id, jsonb_build_object(
       'tenant_id', o.tenant_id, 'entity_id', o.entity_id,
@@ -65,6 +66,9 @@ begin
       'actor_type', 'user', 'created_by', v_actor,
       'evidence_ids', ev, 'lines', lines), v_actor)
   returning id into v_id;
+  exception when unique_violation then
+    raise exception 'REVERSAL_PENDING: entry % already has a pending reversal request', o.seq;
+  end;
   perform audit.append(o.tenant_id, 'user', v_actor, 'reversal.request', 'journal_entry', o.id,
                        jsonb_build_object('draft_id', v_id));
   return v_id;

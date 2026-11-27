@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
-import { appClient, superClient, makeFixture, dsj, post, actAs, authOf, expectCode, TEST_URL, type Fixture } from './helpers.js';
+import { appClient, superClient, makeFixture, dsj, post, actAs, authOf, expectCode, waitUntilBlocked, TEST_URL, type Fixture } from './helpers.js';
 
 let db: pg.Client;
 let f: Fixture;
@@ -118,6 +118,57 @@ describe('review (security): the creator must act in their own session', () => {
     await actAs(db, fx.clerk);
     await expectCode(db.query(`select ledger.reject_draft($1, 'no')`, [d]), 'LOCATION_NOT_PERMITTED');
     await expectCode(db.query('select ledger.request_reversal($1::jsonb)', [JSON.stringify({ entry_id: e.id })]), 'LOCATION_NOT_PERMITTED');
+  });
+});
+describe('review (security, round 3): malformed drafts and duplicate reversal requests', () => {
+  it('drafts with bad or foreign accounts/locations are refused, and a bad stored draft cannot break the queue', async () => {
+    const fx = await makeFixture(db);
+    const other = await makeFixture(db);
+    await actAs(db, fx.user1);
+    const draft = (lines: unknown[]) => db.query('select ledger.propose_entry($1::jsonb)', [JSON.stringify({ tenant_id: fx.tenant, entity_id: fx.entityA,
+      entry_date: '2026-11-10', source_type: 'manual', lines })]);
+    await expectCode(draft([{ account_id: fx.acct.cogs, location_id: 'bad', debit: '1' }, { account_id: fx.acct.cash, location_id: fx.locA1, credit: '1' }]), 'LOCATION_NOT_IN_ENTITY');
+    await expectCode(draft([{ account_id: fx.acct.cogs, location_id: fx.locB1, debit: '1' }, { account_id: fx.acct.cash, location_id: fx.locA1, credit: '1' }]), 'LOCATION_NOT_IN_ENTITY');
+    await expectCode(draft([{ account_id: 'nope', location_id: fx.locA1, debit: '1' }, { account_id: fx.acct.cash, location_id: fx.locA1, credit: '1' }]), 'UNKNOWN_ACCOUNT');
+    await expectCode(draft([{ account_id: other.acct.cogs, location_id: fx.locA1, debit: '1' }, { account_id: fx.acct.cash, location_id: fx.locA1, credit: '1' }]), 'UNKNOWN_ACCOUNT');
+    // A malformed draft already stored (planted by a superuser) is hidden from scoped members, not an error.
+    const d = (await draft([{ account_id: fx.acct.cogs, location_id: fx.locA1, debit: '1' }, { account_id: fx.acct.cash, location_id: fx.locA1, credit: '1' }])).rows[0].propose_entry;
+    const su = await superClient();
+    await su.query('begin');
+    await su.query('set local session_replication_role = replica');
+    await su.query(`update ledger.je_draft set payload = jsonb_set(payload, '{lines,0,location_id}', '"bad"') where id = $1`, [d]);
+    await su.query('commit');
+    await su.end();
+    await actAs(db, fx.clerk);
+    const { rows } = await db.query('select count(*)::int n from ledger.je_draft');
+    expect(rows[0].n).toBe(0);
+    await expectCode(db.query(`select ledger.reject_draft($1, 'bad')`, [d]), 'LOCATION_NOT_PERMITTED');
+  });
+
+  it('two people requesting the same reversal at the same moment: exactly one draft', async () => {
+    const fx = await makeFixture(db);
+    const orig = await post(db, dsj(fx));
+    const conn = async (who: string) => {
+      const c = new pg.Client({ connectionString: TEST_URL });
+      await c.connect();
+      await c.query('set role app_role');
+      await actAs(c, who);
+      return c;
+    };
+    const c1 = await conn(fx.user1);
+    const c2 = await conn(fx.user2);
+    try {
+      await c1.query('begin');
+      await c1.query('select ledger.request_reversal($1::jsonb)', [JSON.stringify({ entry_id: orig.id })]);
+      const c2Pid = (await c2.query('select pg_backend_pid() p')).rows[0].p;
+      const second = c2.query('select ledger.request_reversal($1::jsonb)', [JSON.stringify({ entry_id: orig.id })]).then(() => 'ok', (e) => e.message.split(':')[0]);
+      await waitUntilBlocked(c2Pid); // c2 waits on the unique index entry c1 holds
+      await c1.query('commit');
+      expect(await second).toBe('REVERSAL_PENDING');
+    } finally {
+      await c1.end();
+      await c2.end();
+    }
   });
 });
 void authOf; void superClient;

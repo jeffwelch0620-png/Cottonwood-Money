@@ -63,6 +63,15 @@ begin
     exception when others then
       raise exception 'BAD_LINE_AMOUNT: line amounts must be numbers';
     end;
+    -- Stored drafts are read by RLS policies and the approval queue, so only well-formed ids get in.
+    if coalesce(v_line->>'account_id', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       or not exists (select 1 from public.account where id = (v_line->>'account_id')::uuid and tenant_id = m.tenant_id) then
+      raise exception 'UNKNOWN_ACCOUNT: a draft line account is not in your tenant';
+    end if;
+    if coalesce(v_line->>'location_id', '') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+       or not exists (select 1 from public.location where id = (v_line->>'location_id')::uuid and entity_id = v_entity) then
+      raise exception 'LOCATION_NOT_IN_ENTITY: a draft line location does not belong to this entity';
+    end if;
   end loop;
   if v_dr <> v_cr then
     raise exception 'UNBALANCED: debits % <> credits %', v_dr, v_cr;
