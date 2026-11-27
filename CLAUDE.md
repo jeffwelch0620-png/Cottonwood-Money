@@ -89,9 +89,14 @@ Step 10 (2026-11-27): exit-gate review in `docs/exit-gate/README.md`. Gate items
 (CPA review) provisionally approved by the owner, formal CPA review outstanding — when a CPA
 responds, follow "Closing condition 6" in that file. Phase 0 is complete on that basis.
 
-## Next: Phase 1 (Build Spec §10, after the exit gate)
-Toast daily sales, bank feeds, AP, inventory counts. Read the Product Spec's Phase 1 section first;
-plan the step breakdown with the owner before building.
+## Phase 1 (plan: "Phase 1 Build Spec" tab of the spec doc; steps 1.0–1.9, approved 2026-11-27)
+Step 1.1 done (2026-11-27): migration 0015 + `db/functions/50_integration.sql` + `modules/integration`
++ `apps/worker`. Connectors (run as an integration principal), write-only AES-GCM secrets readable
+only by `worker_role` holding the job lease, Postgres job queue (leases, SKIP LOCKED, 5 attempts →
+dead, insert-only attempt log), repeat-safe sync runs, content-addressed evidence in S3 Object Lock
+(7-year floor), nightly manifest export. 175/175 tests. See README "Integration base".
+Step 1.0 (Supabase/Render/AWS accounts) waits on the owner; S3 is tested at the request level until then.
+Next: step 1.2 (Toast daily sales) — needs the pilot store and Toast API access (owner inputs).
 
 ## Test conventions (step 5+)
 - Every app_role session needs claims: `actAs(db, principalId)` in tests; `withSession()` in app code.
@@ -100,7 +105,11 @@ plan the step breakdown with the owner before building.
 - Fixtures: FY2026 calendar months for both entities; entity A Jan–Sep hard, Oct soft (`f.monthsA`).
   Periods change only via ledger.close_period / seal_period / reopen functions.
 - Race tests must prove the race happened (both outcomes observed), not just pass.
-- New tenant tables must be seeded in auth-rls.test.ts beforeAll (the isolation guard needs rows).
+- New tenant tables must be seeded in auth-rls.test.ts beforeAll (the isolation guard needs rows;
+  integration tables via `seedIntegration`).
+- Worker tests: a `pg.Pool` as the worker; queue calls `set local role worker_role`; tenant work via
+  `ctx.asTenant`. Pass `retryInSeconds: () => 0` to retry at once; simulate time passing by moving
+  `locked_until` / `run_after` / `lease_until` as superuser.
 - API tests: `buildServer` + `app.inject` with HS256 tokens (tests/api.test.ts `as(fx, principal)`).
 - Two people = two sessions: a different creator is only accepted through `approve_draft`
   (`_post`'s `p_draft`); `post()` in tests routes caller≠creator through propose → approve.

@@ -39,3 +39,20 @@ grant execute on function app.current_principal()         to app_role;
 grant execute on function app.has_role(text[])            to app_role;
 grant execute on function app.allowed_locations()         to app_role;
 grant execute on function app.create_tenant(text, text)   to app_role;
+
+-- Integration (Phase 1 step 1.1). app_role: tenant-side calls. worker_role: queue and secrets.
+revoke execute on all functions in schema integration from public;
+grant execute on function integration.create_connector(jsonb)                 to app_role;
+grant execute on function integration.set_connector_status(uuid, text)        to app_role;
+grant execute on function integration.set_connector_secret(uuid, bytea, text) to app_role;
+grant execute on function integration.request_sync(uuid, text)                to app_role;
+grant execute on function integration.start_sync_run(uuid, text, uuid, int)   to app_role;
+grant execute on function integration.finish_sync_run(uuid, text, jsonb, text) to app_role;
+grant execute on function integration.register_evidence(jsonb)                to app_role;
+grant execute on function integration.min_retention()                         to app_role, worker_role;
+grant execute on function integration.enqueue_due_syncs(date)                 to worker_role;
+grant execute on function integration.claim_job(text, int)                    to worker_role;
+grant execute on function integration.heartbeat_job(uuid, text, int)          to worker_role;
+grant execute on function integration.complete_job(uuid, text, jsonb)         to worker_role;
+grant execute on function integration.fail_job(uuid, text, text, int)         to worker_role;
+grant execute on function integration.read_secret(uuid, text)                 to worker_role;
