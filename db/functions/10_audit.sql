@@ -51,6 +51,9 @@ declare
   exp_prev   bytea  := sha256(convert_to('audit-genesis:' || p_tenant::text, 'UTF8'));
   n          bigint := 0;
 begin
+  if p_tenant is distinct from app.current_tenant() then
+    raise exception 'TENANT_MISMATCH: you can only verify your own tenant''s audit chain';
+  end if;
   for e in select * from audit.event where tenant_id = p_tenant order by seq loop
     n := n + 1;
     if e.seq <> exp_seq then

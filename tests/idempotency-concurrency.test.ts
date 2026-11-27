@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type pg from 'pg';
 import { randomUUID } from 'node:crypto';
-import { appClient, appPool, makeFixture, dsj, post, expectCode, count, type Fixture } from './helpers.js';
+import { appClient, appPool, makeFixture, dsj, post, actAs, expectCode, count } from './helpers.js';
 
 let db: pg.Client;
 let pool: pg.Pool;
@@ -88,6 +88,7 @@ describe('concurrency', () => {
     const run = async (payload: unknown) => {
       const c = await pool.connect();
       try {
+        await actAs(c, f.user1);
         await c.query('select ledger.post_intercompany($1::jsonb)', [JSON.stringify(payload)]);
       } finally {
         c.release();

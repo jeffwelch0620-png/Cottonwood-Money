@@ -2,14 +2,15 @@
 // errors carrying the database's codes after it.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type pg from 'pg';
-import { appClient, makeFixture, dsj, type Fixture } from './helpers.js';
-import { postEntry, reverseEntry, verifyChain, trialBalance, LedgerError, type PostEntryInput } from '../modules/ledger/index.js';
+import { appClient, makeFixture, dsj, actAs, type Fixture } from './helpers.js';
+import { postEntry, requestReversal, approveDraft, verifyChain, trialBalance, LedgerError, type PostEntryInput } from '../modules/ledger/index.js';
 
 let db: pg.Client;
 let f: Fixture;
 beforeAll(async () => {
   db = await appClient();
   f = await makeFixture(db);
+  await actAs(db, f.integration); // dsj entries are created (and posted) by the Toast integration
 });
 afterAll(async () => db.end());
 
@@ -39,8 +40,12 @@ describe('ledger module', () => {
   });
 
   it('reverses, verifies and reports a zero trial balance', async () => {
+    await actAs(db, f.integration);
     const r = await postEntry(db, input());
-    await reverseEntry(db, { entry_id: r.id, created_by: f.user1, approved_by: f.user2 });
+    await actAs(db, f.user1);
+    const { draft_id } = await requestReversal(db, { entry_id: r.id });
+    await actAs(db, f.user2);
+    await approveDraft(db, draft_id);
     expect((await verifyChain(db, f.entityA)).ok).toBe(true);
     const tb = await trialBalance(db, f.entityA);
     const d = tb.reduce((a, r) => a + Number(r.debit), 0);

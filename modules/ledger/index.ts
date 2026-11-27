@@ -27,12 +27,13 @@ export const PostEntrySchema = z
     tenant_id: uuid,
     entity_id: uuid,
     entry_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    source_type: z.enum(['pos_dsj', 'ap_bill', 'ap_payment', 'bank', 'payroll', 'inventory', 'manual', 'opening']),
+    source_type: z.enum(['pos_dsj', 'ap_bill', 'ap_payment', 'ar_invoice', 'ar_receipt', 'bank', 'payroll', 'inventory', 'manual', 'opening']),
     idempotency_key: z.string().min(1),
     memo: z.string().optional(),
     actor_type: z.enum(['user', 'agent', 'integration']),
     created_by: uuid,
-    approved_by: uuid.optional(),
+    approved_by: uuid.optional(), // must equal the session's principal if given; the DB derives it
+    allow_soft_close: z.boolean().optional(), // honored only for a controller session
     evidence_ids: z.array(uuid).default([]),
     lines: z.array(LineSchema).min(2),
   })
@@ -84,12 +85,23 @@ export async function postEntry(db: ClientBase, input: PostEntryInput): Promise<
   }
 }
 
-export async function reverseEntry(
-  db: ClientBase,
-  input: { entry_id: string; created_by: string; approved_by: string; entry_date?: string; idempotency_key?: string; memo?: string },
-): Promise<PostResult> {
+/**
+ * Requests a reversal: saves the mirror-image entry as a draft proposed by the caller. A different
+ * person approves it (ledger.approve_draft) to post it.
+ */
+export async function requestReversal(db: ClientBase, input: { entry_id: string; entry_date?: string; memo?: string }): Promise<{ draft_id: string }> {
   try {
-    const { rows } = await db.query('select ledger.reverse_entry($1::jsonb) as r', [JSON.stringify(input)]);
+    const { rows } = await db.query('select ledger.request_reversal($1::jsonb) as id', [JSON.stringify(input)]);
+    return { draft_id: rows[0].id };
+  } catch (err) {
+    throw toLedgerError(err);
+  }
+}
+
+/** Approves a draft (posting it). The caller must not be its proposer. */
+export async function approveDraft(db: ClientBase, draftId: string, allowSoftClose = false): Promise<PostResult & { draft_id: string }> {
+  try {
+    const { rows } = await db.query('select ledger.approve_draft($1, $2) as r', [draftId, allowSoftClose]);
     const r = rows[0].r;
     return { ...r, seq: Number(r.seq) };
   } catch (err) {
@@ -111,4 +123,24 @@ export async function trialBalance(db: ClientBase, entityId: string) {
     [entityId],
   );
   return rows as { number: string; name: string; debit: string; credit: string }[];
+}
+
+/** Links a payment (or credit memo) to the document it settles. settled_on = the payment's date. */
+export async function applyPayment(db: ClientBase, paymentId: string, documentId: string, amount: string, allowSoftClose = false) {
+  try {
+    const { rows } = await db.query('select ledger.apply_payment($1, $2, $3::numeric, $4) as r', [paymentId, documentId, amount, allowSoftClose]);
+    return rows[0].r as { id: string; settled_on: string; amount: string; document_open: string };
+  } catch (err) {
+    throw toLedgerError(err);
+  }
+}
+
+/** Undoes an application with a negative row at the original settlement date. */
+export async function unapplyPayment(db: ClientBase, applicationId: string, allowSoftClose = false) {
+  try {
+    const { rows } = await db.query('select ledger.unapply_payment($1, $2) as r', [applicationId, allowSoftClose]);
+    return rows[0].r as { id: string; reverses_id: string };
+  } catch (err) {
+    throw toLedgerError(err);
+  }
 }

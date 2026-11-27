@@ -3,7 +3,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type pg from 'pg';
 import { randomUUID } from 'node:crypto';
-import { appClient, superClient, makeFixture, dsj, post, expectCode, count, type Fixture } from './helpers.js';
+import { appClient, superClient, makeFixture, dsj, post, actAs, expectCode, count, type Fixture } from './helpers.js';
 
 let db: pg.Client;
 let f: Fixture;
@@ -13,6 +13,7 @@ beforeAll(async () => {
   db = await appClient();
   f = await makeFixture(db);
   other = await makeFixture(db);
+  await actAs(db, f.user1);
 });
 afterAll(async () => db.end());
 
@@ -124,14 +125,14 @@ describe('I2 - every line has a valid entity, location and account', () => {
 });
 
 describe('I3 - posting date must fall in an open period', () => {
-  it('rejects a soft-closed period, unless the soft-close override is set', async () => {
+  it('rejects a soft-closed period, unless a controller sets the soft-close override', async () => {
     await expectCode(post(db, dsj(f, { entry_date: '2026-10-15' })), 'PERIOD_CLOSED');
-    const ok = await post(db, dsj(f, { entry_date: '2026-10-15', allow_soft_close: true }));
+    const ok = await post(db, dsj(f, { entry_date: '2026-10-15', allow_soft_close: true }), f.user1);
     expect(ok.seq).toBeGreaterThan(0);
   });
 
   it('rejects a hard-closed period even with the override', async () => {
-    await expectCode(post(db, dsj(f, { entry_date: '2026-09-10', allow_soft_close: true })), 'PERIOD_CLOSED');
+    await expectCode(post(db, dsj(f, { entry_date: '2026-09-10', allow_soft_close: true }), f.user1), 'PERIOD_CLOSED');
   });
 
   it('rejects a date with no period', async () => {
@@ -139,16 +140,24 @@ describe('I3 - posting date must fall in an open period', () => {
   });
 
   it('periods only move forward, and only seal_period can seal', async () => {
-    await expectCode(db.query(`update period set status = 'open' where id = $1`, [f.periods.octA]), 'PERIOD_BACKWARD');
-    await db.query(`update period set status = 'hard' where id = $1`, [f.periods.octA]);
+    await actAs(db, f.user1);
+    await expect(db.query(`update period set status = 'hard' where id = $1`, [f.periods.octA])).rejects.toThrow(/permission denied/);
+    await expectCode(db.query(`select ledger.close_period($1, 'soft')`, [f.periods.octA]), 'PERIOD_BACKWARD');
+    await db.query(`select ledger.close_period($1, 'hard')`, [f.periods.octA]);
+    const su0 = await superClient();
+    await expectCode(su0.query(`update period set status = 'open' where id = $1`, [f.periods.octA]), 'PERIOD_BACKWARD');
     await expectCode(
-      db.query(`update period set status = 'sealed', seal_hash = '\\x00'::bytea where id = $1`, [f.periods.octA]),
+      su0.query(`update period set status = 'sealed', seal_hash = '\\x00'::bytea where id = $1`, [f.periods.octA]),
       'PERIOD_SEAL_DIRECT',
     );
-    await expectCode(db.query('select ledger.seal_period($1, $2)', [f.periods.octA, f.agent]), 'APPROVER_NOT_USER');
-    const { rows } = await db.query('select ledger.seal_period($1, $2) as r', [f.periods.octA, f.user1]);
+    await su0.end();
+    for (const id of f.monthsA.slice(0, 9)) await db.query('select ledger.seal_period($1)', [id]);
+    await actAs(db, f.agent);
+    await expectCode(db.query('select ledger.seal_period($1)', [f.periods.octA]), 'APPROVER_NOT_USER');
+    await actAs(db, f.user1);
+    const { rows } = await db.query('select ledger.seal_period($1) as r', [f.periods.octA]);
     expect(rows[0].r.seal_hash).toMatch(/^[0-9a-f]{64}$/);
-    await expectCode(post(db, dsj(f, { entry_date: '2026-10-20', allow_soft_close: true })), 'PERIOD_CLOSED');
+    await expectCode(post(db, dsj(f, { entry_date: '2026-10-20', allow_soft_close: true }), f.user1), 'PERIOD_CLOSED');
     await expect(db.query(`delete from period where id = $1`, [f.periods.octA])).rejects.toThrow(/permission denied/);
     const su = await superClient();
     await expectCode(su.query(`delete from period where id = $1`, [f.periods.octA]), 'PERIOD_IMMUTABLE');
@@ -170,18 +179,22 @@ describe('I5 - evidence and approvals', () => {
       dsj(f, { source_type: 'manual', actor_type: 'user', created_by: f.user1, evidence_ids: [], ...over });
     await expectCode(post(db, manual({})), 'APPROVAL_REQUIRED');
     await expectCode(post(db, manual({ approved_by: f.user1 })), 'SELF_APPROVAL');
-    await expectCode(post(db, manual({ approved_by: f.agent })), 'APPROVER_NOT_USER');
+    await expectCode(post(db, manual({ approved_by: f.agent })), 'AGENT_CANNOT_POST');
+    await expectCode(post(db, manual({}), f.integration), 'APPROVER_NOT_USER');
     const ok = await post(db, manual({ approved_by: f.user2 }));
     expect(ok.seq).toBeGreaterThan(0);
   });
 
   it('the declared actor type must match the principal', async () => {
-    await expectCode(post(db, dsj(f, { actor_type: 'user', created_by: f.agent })), 'ACTOR_MISMATCH');
+    await expectCode(post(db, dsj(f, { actor_type: 'user' })), 'ACTOR_MISMATCH'); // the integration claiming to be a user
   });
 
-  it('an agent can create (with evidence) but never approve', async () => {
-    const ok = await post(db, dsj(f, { actor_type: 'agent', created_by: f.agent, source_type: 'ap_bill' }));
-    expect(ok.seq).toBeGreaterThan(0);
+  it('an agent can create (with evidence) but never post; the person who posts it is the approver', async () => {
+    const bill = () => dsj(f, { actor_type: 'agent', created_by: f.agent, source_type: 'ap_bill' });
+    await expectCode(post(db, bill()), 'AGENT_CANNOT_POST');
+    const ok = await post(db, bill(), f.user1);
+    const { rows } = await db.query('select created_by, approved_by from ledger.journal_entry where id = $1', [ok.id]);
+    expect(rows[0]).toEqual({ created_by: f.agent, approved_by: f.user1 });
   });
 });
 
@@ -219,6 +232,7 @@ describe('I6 - intercompany entries post in pairs that net to zero', () => {
   });
 
   it('posts a netting pair atomically with a shared group id', async () => {
+    await actAs(db, f.user1);
     const { rows } = await db.query('select ledger.post_intercompany($1::jsonb) as r', [JSON.stringify(sides())]);
     const r = rows[0].r;
     expect(r.sides).toHaveLength(2);
@@ -227,12 +241,14 @@ describe('I6 - intercompany entries post in pairs that net to zero', () => {
   });
 
   it('rejects a pair that does not net, and writes neither side', async () => {
+    await actAs(db, f.user1);
     const before = await linesFor(f);
     await expectCode(db.query('select ledger.post_intercompany($1::jsonb)', [JSON.stringify(sides('400'))]), 'IC_NOT_NETTING');
     expect(await linesFor(f)).toBe(before);
   });
 
   it('rejects a pair within one entity', async () => {
+    await actAs(db, f.user1);
     const s = sides();
     s.sides[1].entity_id = f.entityA;
     await expectCode(db.query('select ledger.post_intercompany($1::jsonb)', [JSON.stringify(s)]), 'IC_SAME_ENTITY');
@@ -261,35 +277,47 @@ describe('I7 - numbering, hash chain and reversals', () => {
 
   it('reverses an entry exactly once, with two-person approval', async () => {
     const orig = await post(db, dsj(f));
-    const rev = (over: object = {}) =>
-      db.query('select ledger.reverse_entry($1::jsonb) as r', [
-        JSON.stringify({ entry_id: orig.id, created_by: f.user1, approved_by: f.user2, ...over }),
-      ]);
-    await expectCode(rev({ approved_by: f.user1, idempotency_key: `x:${randomUUID()}` }), 'SELF_APPROVAL');
-    const { rows } = await rev();
-    const r = rows[0].r;
+    const request = async (id: string, as = f.user1) => {
+      await actAs(db, as);
+      return (await db.query('select ledger.request_reversal($1::jsonb) id', [JSON.stringify({ entry_id: id })])).rows[0].id as string;
+    };
+    const d = await request(orig.id);
+    await expectCode(db.query('select ledger.approve_draft($1)', [d]), 'SELF_APPROVAL');
+    await actAs(db, f.user2);
+    const r = (await db.query('select ledger.approve_draft($1) r', [d])).rows[0].r;
     const net = await db.query(
       `select sum(debit - credit)::text n from ledger.journal_line where entry_id = any($1::uuid[])`,
       [[orig.id, r.id]],
     );
     expect(net.rows[0].n).toBe('0.0000');
-    await expectCode(rev({ idempotency_key: `again:${randomUUID()}` }), 'ALREADY_REVERSED');
-    await expectCode(
-      db.query('select ledger.reverse_entry($1::jsonb)', [JSON.stringify({ entry_id: r.id, created_by: f.user1, approved_by: f.user2 })]),
-      'REVERSAL_LINK',
-    );
+    await expectCode(request(orig.id), 'ALREADY_REVERSED');
+    await expectCode(request(r.id), 'REVERSAL_LINK');
   });
 
-  it('rejects a hand-built "reversal" whose lines do not mirror the original', async () => {
+  it('a "reversal" can only come from a reversal request, and its lines must mirror the original', async () => {
     const orig = await post(db, dsj(f));
     const fake = dsj(f, {
-      source_type: 'reversal', reverses_id: orig.id, actor_type: 'user', created_by: f.user1, approved_by: f.user2,
+      source_type: 'reversal', reverses_id: orig.id, actor_type: 'user', created_by: f.user1,
       lines: [
         { account_id: f.acct.sales, location_id: f.locA1, debit: '1.0000' },
         { account_id: f.acct.clearing, location_id: f.locA1, credit: '1.0000' },
       ],
     });
-    await expectCode(post(db, fake), 'REVERSAL_MISMATCH');
+    await expectCode(post(db, fake), 'APPROVAL_REQUIRED'); // posted directly by its creator
+    await actAs(db, f.user1);
+    const { evidence_ids: _e, idempotency_key: _k, created_by: _c, actor_type: _t, ...draft } = fake as Record<string, unknown>;
+    await expectCode(db.query('select ledger.propose_entry($1::jsonb)', [JSON.stringify(draft)]), 'BAD_SOURCE_TYPE');
+    // Backstop: even a reversal draft whose payload a superuser tampered with is refused at approval.
+    const d = (await db.query('select ledger.request_reversal($1::jsonb) id', [JSON.stringify({ entry_id: orig.id })])).rows[0].id;
+    const su = await superClient();
+    await su.query('begin');
+    await su.query('set local session_replication_role = replica');
+    // Still balanced, but line 1 now hits cash instead of mirroring the original's clearing line.
+    await su.query(`update ledger.je_draft set payload = jsonb_set(payload, '{lines,0,account_id}', to_jsonb($2::text)) where id = $1`, [d, f.acct.cash]);
+    await su.query('commit');
+    await su.end();
+    await actAs(db, f.user2);
+    await expectCode(db.query('select ledger.approve_draft($1)', [d]), 'REVERSAL_MISMATCH');
   });
 
   it('app_role cannot call the internal posting function', async () => {

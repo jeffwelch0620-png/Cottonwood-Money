@@ -6,7 +6,10 @@
 -- Errors are raised as 'CODE: detail' so the application can map them to typed errors.
 set role ledger_owner;
 
-create or replace function ledger._post(p jsonb, p_ic_group uuid default null)
+-- p_draft: set only by ledger.approve_draft (app_role cannot call _post), proving the creator
+-- proposed this entry in their own session. Without it, the caller must be the creator.
+drop function if exists ledger._post(jsonb, uuid);
+create or replace function ledger._post(p jsonb, p_ic_group uuid default null, p_draft uuid default null)
 returns ledger.journal_entry
 language plpgsql security definer set search_path = pg_catalog, public, pg_temp as $$
 declare
@@ -31,6 +34,10 @@ declare
   v_head_seq  bigint;
   v_head_hash bytea;
   v_orig     ledger.journal_entry;
+  v_member   public.membership;
+  v_caller   uuid;
+  v_caller_kind text;
+  v_soft     boolean := false;
 begin
   -- 0. Required fields -----------------------------------------------------------------
   begin
@@ -43,6 +50,29 @@ begin
   if v_tenant is null or v_entity is null or v_date is null or v_src is null
      or coalesce(v_key, '') = '' or p->>'actor_type' is null or p->>'created_by' is null then
     raise exception 'MISSING_FIELD: tenant_id, entity_id, entry_date, source_type, idempotency_key, actor_type and created_by are required';
+  end if;
+
+  -- 0b. Caller: a verified member of THIS tenant, acting as their own principal -------
+  v_member := app.current_member();
+  if v_member.tenant_id is null then
+    raise exception 'NOT_AUTHENTICATED: no verified, MFA-complete membership for this session';
+  end if;
+  if v_tenant <> v_member.tenant_id then
+    raise exception 'TENANT_MISMATCH: entry is for tenant %, session is for tenant %', v_tenant, v_member.tenant_id;
+  end if;
+  if v_member.role = 'viewer' then
+    raise exception 'ROLE_FORBIDDEN: viewers cannot post';
+  end if;
+  select id, kind into v_caller, v_caller_kind from public.principal
+   where tenant_id = v_member.tenant_id and auth_user_id = v_member.user_id;
+  if v_caller is null then
+    raise exception 'NO_PRINCIPAL: this login has no principal in the tenant';
+  end if;
+  if (v_member.role = 'service') <> (v_caller_kind <> 'user') then
+    raise exception 'MEMBERSHIP_KIND_MISMATCH: role % cannot act as a % principal', v_member.role, v_caller_kind;
+  end if;
+  if v_caller_kind = 'agent' then
+    raise exception 'AGENT_CANNOT_POST: agents propose; a person or integration must post';
   end if;
 
   if not exists (select 1 from public.entity where id = v_entity and tenant_id = v_tenant) then
@@ -63,7 +93,7 @@ begin
   end if;
 
   -- 3. Source type and intercompany routing -------------------------------------------
-  if v_src not in ('pos_dsj','ap_bill','ap_payment','bank','payroll','inventory',
+  if v_src not in ('pos_dsj','ap_bill','ap_payment','ar_invoice','ar_receipt','bank','payroll','inventory',
                    'manual','reversal','intercompany','opening') then
     raise exception 'BAD_SOURCE_TYPE: %', v_src;
   end if;
@@ -74,7 +104,6 @@ begin
   -- 4. Actors and approval (segregation of duties) ------------------------------------
   e.actor_type := p->>'actor_type';
   e.created_by := (p->>'created_by')::uuid;
-  e.approved_by := nullif(p->>'approved_by', '')::uuid;
 
   select kind into v_kind from public.principal where id = e.created_by and tenant_id = v_tenant;
   if v_kind is null then
@@ -84,18 +113,38 @@ begin
     raise exception 'ACTOR_MISMATCH: creator is a %, entry says %', v_kind, e.actor_type;
   end if;
 
-  if e.approved_by is not null then
-    v_kind := null;
-    select kind into v_kind from public.principal where id = e.approved_by and tenant_id = v_tenant;
-    if v_kind is null then
-      raise exception 'UNKNOWN_PRINCIPAL: approver % is not in tenant', e.approved_by;
-    end if;
-    if v_kind <> 'user' then
-      raise exception 'APPROVER_NOT_USER: only people can approve; approver is a %', v_kind;
-    end if;
-    if e.approved_by = e.created_by then
+  -- A human creator must be a real, active member (no ghost principals as "the other person").
+  if v_kind = 'user' and not exists (
+       select 1 from public.principal pr
+         join public.membership m on m.user_id = pr.auth_user_id and m.tenant_id = pr.tenant_id
+        where pr.id = e.created_by and m.active and m.role <> 'viewer') then
+    raise exception 'CREATOR_NOT_MEMBER: creator % has no active membership', e.created_by;
+  end if;
+
+  -- The approver is never taken from input: it is the caller, when the caller is not the
+  -- creator. An approved_by in the input may only restate that.
+  if v_caller = e.created_by then
+    if nullif(p->>'approved_by', '')::uuid = e.created_by then
       raise exception 'SELF_APPROVAL: creator cannot approve their own entry';
+    elsif nullif(p->>'approved_by', '') is not null then
+      raise exception 'APPROVER_NOT_CALLER: approval must be given in the approver''s own session';
     end if;
+    e.approved_by := null;
+  else
+    -- Naming someone else as creator is only possible for a draft they proposed themselves.
+    if p_draft is null then
+      raise exception 'CREATOR_NOT_CALLER: post as yourself, or have % propose a draft for approval', e.created_by;
+    end if;
+    if not exists (select 1 from ledger.je_draft where id = p_draft and created_by = e.created_by and state = 'pending') then
+      raise exception 'CREATOR_NOT_CALLER: draft % was not proposed by the named creator', p_draft;
+    end if;
+    if nullif(p->>'approved_by', '') is not null and (p->>'approved_by')::uuid <> v_caller then
+      raise exception 'APPROVER_NOT_CALLER: approval must be given in the approver''s own session';
+    end if;
+    if v_caller_kind <> 'user' then
+      raise exception 'APPROVER_NOT_USER: only people can approve; caller is a %', v_caller_kind;
+    end if;
+    e.approved_by := v_caller;
   end if;
   if v_src in ('manual', 'reversal', 'opening') and e.approved_by is null then
     raise exception 'APPROVAL_REQUIRED: % entries need a second-person approver', v_src;
@@ -107,8 +156,13 @@ begin
   if not found then
     raise exception 'NO_PERIOD: no fiscal period covers % for this entity', v_date;
   end if;
-  if not (v_period.status = 'open'
-          or (v_period.status = 'soft' and coalesce((p->>'allow_soft_close')::boolean, false))) then
+  if v_period.status = 'soft' and coalesce((p->>'allow_soft_close')::boolean, false) then
+    if v_member.role not in ('owner', 'controller') then
+      raise exception 'SOFT_CLOSE_FORBIDDEN: only an owner or controller can post into a soft-closed period';
+    end if;
+    v_soft := true;
+  end if;
+  if not (v_period.status = 'open' or v_soft) then
     raise exception 'PERIOD_CLOSED: period % is %', v_period.id, v_period.status;
   end if;
 
@@ -149,6 +203,10 @@ begin
                     where id = (v_line->>'location_id')::uuid and entity_id = v_entity) then
       raise exception 'LOCATION_NOT_IN_ENTITY: line % location does not belong to this entity', v_n;
     end if;
+    if v_member.location_ids is not null
+       and not ((v_line->>'location_id')::uuid = any(v_member.location_ids)) then
+      raise exception 'LOCATION_NOT_PERMITTED: line % location is outside your location scope', v_n;
+    end if;
 
     insert into ledger.journal_line
       (entry_id, line_no, tenant_id, entity_id, account_id, location_id, debit, credit, dims)
@@ -163,11 +221,16 @@ begin
   if v_dr <> v_cr then
     raise exception 'UNBALANCED: debits % <> credits %', v_dr, v_cr;
   end if;
+  if e.approved_by is not null and v_member.approval_limit is not null and v_dr > v_member.approval_limit then
+    raise exception 'APPROVAL_LIMIT: entry total % exceeds your approval limit %', v_dr, v_member.approval_limit;
+  end if;
 
   -- 7. Evidence (I5) -------------------------------------------------------------------
   v_ev := array(select distinct x::uuid
                   from jsonb_array_elements_text(coalesce(p->'evidence_ids', '[]'::jsonb)) x);
-  if v_src not in ('manual', 'opening') and cardinality(v_ev) = 0 then
+  -- A reversal cites exactly its original's documents (checked in step 8), which may be none for
+  -- a manual or opening entry.
+  if v_src not in ('manual', 'opening', 'reversal') and cardinality(v_ev) = 0 then
     raise exception 'NO_EVIDENCE: % entries must cite at least one source document', v_src;
   end if;
   if (select count(*) from public.source_document where tenant_id = v_tenant and id = any(v_ev))
@@ -190,6 +253,11 @@ begin
     if exists (select 1 from ledger.journal_entry where reverses_id = v_orig.id) then
       raise exception 'ALREADY_REVERSED: entry % already has a reversal', v_orig.id;
     end if;
+    -- A payment or document that still settles something would keep driving the cash view.
+    if (select coalesce(sum(amount), 0) from ledger.payment_application
+         where payment_entry_id = v_orig.id or document_entry_id = v_orig.id) <> 0 then
+      raise exception 'HAS_APPLICATIONS: entry % still has payment applications; unapply them first', v_orig.seq;
+    end if;
     if exists (
          (select account_id, location_id, debit, credit, dims from ledger.journal_line where entry_id = v_orig.id
           except all
@@ -199,6 +267,12 @@ begin
           except all
           select account_id, location_id, debit, credit, dims from ledger.journal_line where entry_id = v_orig.id)) then
       raise exception 'REVERSAL_MISMATCH: reversal lines must mirror the original exactly';
+    end if;
+    if exists ((select source_document_id from ledger.entry_evidence where entry_id = v_orig.id
+                except select unnest(v_ev))
+               union all
+               (select unnest(v_ev) except select source_document_id from ledger.entry_evidence where entry_id = v_orig.id)) then
+      raise exception 'REVERSAL_MISMATCH: a reversal cites exactly the original''s source documents';
     end if;
     e.reverses_id := v_orig.id;
   elsif p->>'reverses_id' is not null then
@@ -226,7 +300,8 @@ begin
 
   perform audit.append(v_tenant, e.actor_type, e.created_by, 'ledger.post', 'journal_entry', e.id,
     jsonb_build_object('entity_id', v_entity, 'seq', e.seq, 'source_type', v_src,
-                       'hash', encode(e.hash, 'hex'), 'approved_by', e.approved_by));
+                       'hash', encode(e.hash, 'hex'), 'approved_by', e.approved_by,
+                       'posted_by', v_caller, 'soft_close_override', v_soft));
   return e;
 end $$;
 
