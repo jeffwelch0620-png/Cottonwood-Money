@@ -184,3 +184,38 @@ describe('review (security, round 3): malformed drafts and duplicate reversal re
   });
 });
 void authOf; void superClient;
+
+describe('review (security, PR #2): new functions are never callable before they are granted', () => {
+  it('a function created by the ledger owner (or the migrating role) has no PUBLIC EXECUTE', async () => {
+    const su = await superClient();
+    try {
+      await su.query('begin');
+      await su.query('set local role ledger_owner');
+      await su.query(`create function ledger.zz_probe() returns int language sql security definer as 'select 1'`);
+      await su.query('reset role');
+      await su.query(`create function public.zz_probe2() returns int language sql as 'select 2'`);
+      const { rows } = await su.query(`select has_function_privilege('app_role', 'ledger.zz_probe()', 'execute') a,
+                                              has_function_privilege('app_role', 'public.zz_probe2()', 'execute') b`);
+      expect(rows[0]).toEqual({ a: false, b: false });
+    } finally {
+      await su.query('rollback');
+      await su.end();
+    }
+  });
+
+  it('function files apply atomically: if one fails, functions from earlier files are not created', async () => {
+    const { mkdtempSync, cpSync, writeFileSync, appendFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const { migrate } = await import('../db/migrate.js');
+    const dir = mkdtempSync(join(tmpdir(), 'fns-'));
+    cpSync(new URL('../db/functions', import.meta.url).pathname, dir, { recursive: true });
+    appendFileSync(join(dir, '30_post.sql'), `\ncreate function ledger.zz_atomic_probe() returns int language sql as 'select 1';\n`);
+    writeFileSync(join(dir, '98_broken.sql'), 'select this_is_not_valid_sql(;');
+    await expect(migrate(TEST_URL, false, { functionsDir: dir })).rejects.toThrow(/98_broken\.sql failed \(no function file was applied\)/);
+    const su = await superClient();
+    const { rows } = await su.query(`select to_regprocedure('ledger.zz_atomic_probe()') p`);
+    await su.end();
+    expect(rows[0].p).toBeNull();
+  });
+});

@@ -17,13 +17,19 @@
 -- therefore re-dates exactly its own amounts.
 set role ledger_owner;
 
-create or replace function ledger._entry_shape(p_entity uuid)
+-- p_entry limits the work to one entry (apply_payment); null = the whole entity (cash_lines).
+-- One query text, two WHERE clauses: "entry_id = p_entry OR p_entry IS NULL" would hide the
+-- entry_id index from the planner and make every payment application scan the entity.
+drop function if exists ledger._entry_shape(uuid);
+create or replace function ledger._entry_shape(p_entity uuid, p_entry uuid default null)
 returns table (entry_id uuid, s numeric, a numeric, f numeric, r numeric, g numeric, alpha numeric, is_doc boolean)
-language sql stable security definer set search_path = pg_catalog, public, pg_temp as $$
+language plpgsql stable security definer set search_path = pg_catalog, public, pg_temp as $$
+begin
+  return query execute format($q$
   with l as (
     select jl.entry_id, jl.debit - jl.credit amt, ac.cash_view cv
       from ledger.journal_line jl join public.account ac on ac.id = jl.account_id
-     where jl.entity_id = p_entity),
+     where %s),
   s as (
     select l.entry_id, coalesce(sum(l.amt) filter (where l.cv = 'settle'), 0) s from l group by l.entry_id),
   t as (
@@ -38,7 +44,9 @@ language sql stable security definer set search_path = pg_catalog, public, pg_te
   select u.entry_id, u.s, u.a, u.f, u.r, u.g, u.alpha,
          coalesce(u.s <> 0 and u.f <> 0 and u.alpha >= 0 and u.alpha < 1, false)
     from u
-$$;
+  $q$, case when p_entry is null then 'jl.entity_id = $1' else 'jl.entry_id = $2 and jl.entity_id = $1' end)
+  using p_entity, p_entry;
+end $$;
 
 -- Lines of the session's tenant visible to the caller (location scope), on either basis.
 create or replace function ledger.cash_lines(p_entity uuid)
@@ -91,7 +99,7 @@ language sql stable security definer set search_path = pg_catalog, public, pg_te
     select f.entry_id, f.line_id, f.account_id, f.location_id, f.gdate view_date,
            f.cum_amt - coalesce(lag(f.cum_amt) over (partition by f.line_id order by f.gi), 0) amount
       from fixed f),
-  allowed as (select app.allowed_locations() locs)
+  allowed as materialized (select app.allowed_locations() locs)  -- once, not per row
   select x.entry_id, x.line_id, x.account_id, x.location_id, x.view_date, x.amount
     from (select e.entry_id, e.line_id, e.account_id, e.location_id, e.view_date, e.amount from emitted e
           union all
@@ -105,21 +113,30 @@ $$;
 create or replace function ledger.accrual_lines(p_entity uuid)
 returns table (entry_id uuid, line_id uuid, account_id uuid, location_id uuid, view_date date, amount numeric)
 language sql stable security definer set search_path = pg_catalog, public, pg_temp as $$
+  -- The scope is computed once: MATERIALIZED stops the planner inlining it back into a per-row
+  -- filter (app.allowed_locations() per row cost ~6 s at 70k lines).
+  with scope as materialized (select app.allowed_locations() locs,
+                        exists (select 1 from public.entity en where en.id = p_entity and en.tenant_id = app.current_tenant()) ok)
   select jl.entry_id, jl.id, jl.account_id, jl.location_id, je.entry_date, jl.debit - jl.credit
-    from ledger.journal_line jl
+    from scope, ledger.journal_line jl
     join ledger.journal_entry je on je.id = jl.entry_id
-   where jl.entity_id = p_entity
-     and exists (select 1 from public.entity en where en.id = p_entity and en.tenant_id = app.current_tenant())
-     and (app.allowed_locations() is null or jl.location_id = any(app.allowed_locations()))
+   where jl.entity_id = p_entity and scope.ok
+     and (scope.locs is null or jl.location_id = any(scope.locs))
 $$;
 
+-- Chooses one source: the planner cannot skip a SECURITY DEFINER function inside a UNION, so a
+-- UNION here made every accrual report compute the whole cash view too.
+drop function if exists ledger.basis_lines(uuid, text);
 create or replace function ledger.basis_lines(p_entity uuid, p_basis text)
 returns table (entry_id uuid, line_id uuid, account_id uuid, location_id uuid, view_date date, amount numeric)
-language sql stable security definer set search_path = pg_catalog, public, pg_temp as $$
-  select * from ledger.cash_lines(p_entity) where p_basis = 'cash'
-  union all
-  select * from ledger.accrual_lines(p_entity) where p_basis = 'accrual'
-$$;
+language plpgsql stable security definer set search_path = pg_catalog, public, pg_temp as $$
+begin
+  if p_basis = 'cash' then
+    return query select * from ledger.cash_lines(p_entity);
+  else
+    return query select * from ledger.accrual_lines(p_entity);
+  end if;
+end $$;
 
 -- Checks the entity is in the session's tenant and resolves the basis (default: entity's).
 create or replace function ledger._report_basis(p_entity uuid, p_basis text) returns text
@@ -345,7 +362,7 @@ begin
     raise exception 'ENTRY_REVERSED: reversed entries and reversals cannot be applied';
   end if;
 
-  select * into sh from ledger._entry_shape(doc.entity_id) x where x.entry_id = doc.id;
+  select * into sh from ledger._entry_shape(doc.entity_id, doc.id);
   if not sh.is_doc then
     raise exception 'NOT_A_DOCUMENT: entry % has no open AR/AP balance to settle', doc.seq;
   end if;

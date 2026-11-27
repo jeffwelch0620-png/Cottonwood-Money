@@ -1,5 +1,10 @@
 // Applies numbered migrations once each (tracked in schema_migrations), then re-applies
 // every file in db/functions (all are CREATE OR REPLACE, so re-running is safe).
+//
+// All function files run in ONE transaction, ending with 99_grants.sql: either every function
+// and its permissions land together, or nothing changes. Applied file by file, a new function
+// would be visible (with PUBLIC EXECUTE) before the grants file locked it down — and would stay
+// that way if a later file failed.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,7 +12,7 @@ import pg from 'pg';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-export async function migrate(connectionString: string, log = false): Promise<void> {
+export async function migrate(connectionString: string, log = false, opts: { functionsDir?: string } = {}): Promise<void> {
   const client = new pg.Client({ connectionString });
   await client.connect();
   try {
@@ -30,17 +35,20 @@ export async function migrate(connectionString: string, log = false): Promise<vo
       }
     }
 
-    const fnDir = join(here, 'functions');
-    for (const file of readdirSync(fnDir).filter((f) => f.endsWith('.sql')).sort()) {
-      await client.query('begin');
-      try {
+    const fnDir = opts.functionsDir ?? join(here, 'functions');
+    const files = readdirSync(fnDir).filter((f) => f.endsWith('.sql')).sort();
+    await client.query('begin');
+    let current = '';
+    try {
+      for (const file of files) {
+        current = file;
         await client.query(readFileSync(join(fnDir, file), 'utf8'));
-        await client.query('commit');
         if (log) console.log(`applied ${file}`);
-      } catch (err) {
-        await client.query('rollback');
-        throw new Error(`function file ${file} failed: ${(err as Error).message}`);
       }
+      await client.query('commit');
+    } catch (err) {
+      await client.query('rollback');
+      throw new Error(`function file ${current} failed (no function file was applied): ${(err as Error).message}`);
     }
   } finally {
     await client.end();

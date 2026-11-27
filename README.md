@@ -211,6 +211,11 @@ are mapped to `LedgerError.code` in TypeScript.
 
 ## Test results (this build)
 
+- **Exit-gate run: 1,000,000 entries, PASS** (`docs/exit-gate/1m-run.md`): 10 entities × 100,000
+  entries, every trial balance 0.0000 on both bases, every hash and audit chain verifies, cash view
+  balanced on every date, tie-out difference 0.0000. Posting 858 entries/s across 10 entities.
+- CI on every pull request: ledger tests on Postgres 16, type checks, console build, browser e2e.
+
 - 133 / 133 tests pass on a fresh database; TypeScript type check clean.
 - Step 8a: the full admin journey (sign-up → COA template → 4-4-5 entity → member → two-person manual
   JE → reports → close → two-person reopen → audit export) runs through HTTP in one test. Mutation
@@ -248,11 +253,10 @@ are mapped to `LedgerError.code` in TypeScript.
 | Member invite by email | Members are added by Supabase user id | Supabase deployment |
 | Evidence upload in the console | Drafts from the console are manual/opening; documents for other types attach via the API | Phase 1 evidence module |
 | Console e2e not in `npm test` | Needs a browser and two servers; run `npm run e2e:admin` in CI as its own job | CI setup |
-| Cash view is computed per request | Fine at Phase 0 volumes; spec calls for materialized balances refreshed on post | Week 10–11 tuning (1M run) |
+| Cash view is computed per request | Measured at 100k entries per entity: cash reports ~2.2 s, accrual <1 s (`docs/exit-gate/1m-run.md`); stored balances deferred | Phase 1, if real volumes need it |
 | Applications into closed periods | A prepaid or deposit applied after its payment's period closed is refused | CPA review (week 10–11) |
 | Applications aren't hash-chained | Each is in the hash-chained audit log; the verifier doesn't cross-check them yet | With the manifest worker |
 | Sealing doesn't anchor externally | Seal hash is stored; optional external timestamp anchor (Product Spec) not built | With the manifest export worker |
 | Manifest is stored in the DB only | Export to write-once storage + owner email is a worker job | Weeks 4–5 follow-up |
 | Audit chain serializes all postings in a tenant | Fine at restaurant volumes (~400/s measured per entity) | Revisit if a tenant exceeds it |
 | Reversing an intercompany pair | Needs a paired reversal function | Phase 1 |
-| Exit-gate 1M-entry run | 50k run done here; 1M takes ~40 min | Week 10–11 |
