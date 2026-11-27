@@ -1,4 +1,4 @@
-// Sample POS connector: stands in for Toast until credentials exist (step 1.2 replaces it).
+// Sample POS connector: stands in for Toast until credentials exist (step 1.3 replaces it).
 // Produces a deterministic end-of-day file for (connector, business day), stores it as evidence,
 // and posts one daily sales entry. Same day -> same bytes -> same evidence -> same key: re-runs
 // post nothing twice.

@@ -306,7 +306,7 @@ conditions met; the CPA review is provisionally approved by the owner, with the 
 | Sealing doesn't anchor externally | Seal hash is stored; optional external timestamp anchor (Product Spec) not built | With the manifest export worker |
 | Manifest export not yet emailed to the owner | The nightly manifest is written to locked storage (step 1.1); the owner copy by email isn't built | Phase 1 notifications |
 | S3 Object Lock not yet exercised live | Adapter tested at the request level; needs the AWS account and a bucket with Object Lock | Phase 1 step 1.0 (accounts) |
-| Nightly schedule uses the UTC day | Business days are per location time zone (Toast) | Step 1.2 (Toast daily sales) |
-| Connectors have no console page or API routes yet | Created and run through the database functions and the worker | Step 1.2 (with the Toast connector) |
+| Nightly schedule uses the UTC day | Business days are per location time zone (Toast) | Step 1.3 (Toast daily sales) |
+| Connectors have no console page or API routes yet | Created and run through the database functions and the worker | Step 1.3 (with the Toast connector) |
 | Audit chain serializes all postings in a tenant | Fine at restaurant volumes (~400/s measured per entity) | Revisit if a tenant exceeds it |
 | Reversing an intercompany pair | Needs a paired reversal function | Phase 1 |
