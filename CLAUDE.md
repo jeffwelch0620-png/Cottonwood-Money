@@ -97,7 +97,10 @@ dead, insert-only attempt log), repeat-safe sync runs, content-addressed evidenc
 (7-year floor; an existing object's lock is extended before it is recorded), leases renewed while a
 handler runs, nightly manifest export. 180/180 tests. See README "Integration base".
 Step 1.0 (Supabase/Render/AWS accounts) waits on the owner; S3 is tested at the request level until then.
-Next: step 1.2 (Toast daily sales) — needs the pilot store and Toast API access (owner inputs).
+Pilot store (owner decision 2026-11-27): Rudd's. Runs Toast; DoorDash direct ordering is connected to
+its Toast (third-party delivery flows through it); its kitchen ships bulk product to Bert's (a
+location transfer, not a sale — intercompany only if they are separate entities).
+Next: step 1.2 (Toast daily sales) — needs Toast API access for Rudd's (owner input).
 
 ## Test conventions (step 5+)
 - Every app_role session needs claims: `actAs(db, principalId)` in tests; `withSession()` in app code.
