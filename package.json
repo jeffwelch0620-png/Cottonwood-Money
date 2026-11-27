@@ -9,7 +9,10 @@
     "migrate": "tsx db/migrate.ts",
     "test": "vitest run",
     "typecheck": "tsc",
-    "api": "tsx apps/api/main.ts"
+    "api": "tsx apps/api/main.ts",
+    "dev:token": "tsx scripts/dev-token.ts",
+    "dev:seed": "tsx scripts/dev-seed.ts",
+    "e2e:admin": "scripts/e2e-admin.sh"
   },
   "dependencies": {
     "decimal.js": "^10.6.0",

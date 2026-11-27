@@ -71,10 +71,14 @@ Step 8a done (2026-11-27): migrations 0009–0010, `db/functions/85_admin.sql`, 
 membership/setup changes, USAR-style COA template, JE viewer, audit export, cash_view fixed once
 posted. 133/133 tests; ~430 posts/s. See README "Admin layer".
 
-## Next: Phase 0 step 8b — admin console UI (`apps/admin`, Next.js per Build Spec §3)
-Screens over the 8a API: tenants/entities, COA editor (+ template), periods (close/seal/reopen),
-draft queue with approve/reject, JE list + viewer (evidence, hash checks), reports, audit export.
-Then steps 9–10 (1M-entry run + CPA review, exit gate).
+Step 8b done (2026-11-27): `apps/admin` (Next.js 16, own package) over the 8a API — overview,
+approvals, journal (list, viewer, new draft, reversal), reports, periods, COA, entities, members,
+audit. `npm run e2e:admin` runs all console flows in a browser on a fresh seeded tenant.
+Next.js bakes API_URL (the /v1 proxy) into the build.
+
+## Next: Phase 0 step 9 (weeks 10–11)
+1M-entry property run, query tuning (incl. materialized balances for the cash view), CPA review of
+the COA template, close rules and reversal policy. Then step 10: exit-gate review (Build Spec §1).
 
 ## Test conventions (step 5+)
 - Every app_role session needs claims: `actAs(db, principalId)` in tests; `withSession()` in app code.
@@ -85,6 +89,8 @@ Then steps 9–10 (1M-entry run + CPA review, exit gate).
 - Race tests must prove the race happened (both outcomes observed), not just pass.
 - New tenant tables must be seeded in auth-rls.test.ts beforeAll (the isolation guard needs rows).
 - API tests: `buildServer` + `app.inject` with HS256 tokens (tests/api.test.ts `as(fx, principal)`).
+- Console: client components only; `useApi` keys results by path; money via lib/money (Decimal).
+  Run servers with setsid and kill the process group (next-server outlives npx).
 
 ## Working style for this owner
 Logic first, short explanations, show the math in summary form, diagrams welcome.

@@ -4,7 +4,7 @@ The audit-grade core of the restaurant accounting platform. Weeks 1–6 of the P
 build spec: schema, posting function, guards, hash chain, verifier (steps 1–4), then
 auth, membership and row-level security (step 5), fiscal calendars and the close
 workflow (step 6), payment application, cash/accrual views and reports (step 7), the admin
-database layer and API (step 8a), and the tests that prove them.
+database layer and API (step 8a), the admin console (step 8b), and the tests that prove them.
 
 **Design rule:** the database enforces the books, not the app. The application role
 can only `EXECUTE` the posting functions; it has no INSERT/UPDATE/DELETE on ledger
@@ -21,6 +21,16 @@ npm run typecheck
 
 # API server (Supabase HS256 secret, or SUPABASE_JWKS_URL for asymmetric keys)
 DATABASE_URL=... SUPABASE_JWT_SECRET=... npm run api
+
+# Admin console (Next.js). API_URL is compiled into the build's /v1 proxy.
+cd apps/admin && npm install && API_URL=http://localhost:3000 npm run build && npm start   # :3100
+# Supabase sign-in: set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY at build time.
+# Without them the console offers dev sign-in with a pasted token:
+SUPABASE_JWT_SECRET=... npm run dev:token -- <auth_user_id> <tenant_id>
+# Demo tenant with a year of activity, plus tokens for owner/controller/bookkeeper:
+DATABASE_URL=<superuser url> SUPABASE_JWT_SECRET=... npm run dev:seed
+# Console end-to-end flows (fresh DB, seed, build, both servers, Playwright, cleanup):
+npm run e2e:admin
 
 # Migrate a real database
 DATABASE_URL=postgres://user:pass@host:5432/db npm run migrate
@@ -45,6 +55,8 @@ db/functions/    session identity (app.*) · audit chain · canonical form + has
                  cash view + reports + payment application · admin (drafts, COA template,
                  JE viewer, audit export) · RLS policies · grants
 apps/api/        Fastify server: Supabase JWT → withSession(app_role) → database functions
+apps/admin/      Next.js console over the API (own package); e2e/flows.cjs drives it in a browser
+scripts/         dev-token · dev-seed (demo tenant) · e2e-admin.sh
 db/migrate.ts    migration runner (numbered files once; functions re-applied every run)
 modules/shared/  money (Decimal, never JS numbers)
 modules/ledger/  TypeScript entry points + typed LedgerError codes
@@ -163,6 +175,25 @@ entity / location / account / principal insert or update → audit event with ac
   close/seal/reopen, drafts, entries (list, viewer, post, reverse), payment applications, source
   documents, reports, chain verify, audit export. Error codes map to 400/401/403/404/409/422.
 
+## Admin console (step 8b)
+
+```
+Browser (Next.js client) ──Bearer JWT──► /v1/* proxy ──► API ──withSession(app_role)──► Postgres
+   sign-in: Supabase password + TOTP (aal2) · dev: pasted token from `npm run dev:token`
+   the console holds no rules; refusals are shown with the ledger's code (APPROVAL_LIMIT, LAST_OWNER, …)
+```
+| Screen | What it does |
+|---|---|
+| Overview | Pending drafts and reopens, hash-chain status, earliest open period, latest entries |
+| Approvals | Draft queue with lines and proposer; approve (own drafts disabled) or reject with a reason; reopen requests |
+| Journal | Entry list (date filter, paging); viewer with hash/link checks, evidence SHA-256, people, links; reversal; new-entry form with a live Decimal balance check, submitted as a draft |
+| Reports | P&L (by location), balance sheet, trial balance, cash/accrual tie-out; basis toggle printed on each |
+| Periods | Fiscal years and periods; soft/hard close, seal (confirm), reopen request |
+| Chart of accounts | Accounts, add, rename, deactivate, load the restaurant template |
+| Entities | Entities with calendar settings, locations |
+| Members | Roles, location scope, approval limits, deactivate (owner only) |
+| Audit | JSONL/CSV export with chain status and file SHA-256; per-entity chain verification |
+
 Roles: `owner` (members/principals + everything a controller can do) · `controller` (COA, periods, soft-close posting, seal) ·
 `bookkeeper` / `manager` (post and approve within scope and limit) · `viewer` (read) ·
 `service` (machine login for an agent or integration principal; no MFA, never approves).
@@ -177,6 +208,11 @@ are mapped to `LedgerError.code` in TypeScript.
 - Step 8a: the full admin journey (sign-up → COA template → 4-4-5 entity → member → two-person manual
   JE → reports → close → two-person reopen → audit export) runs through HTTP in one test. Mutation
   check: removing the last-owner lock lets two owners demote each other (test fails).
+- Step 8b: `npm run e2e:admin` drives the console as three people on a fresh seeded tenant: own-draft
+  approval disabled, APPROVAL_LIMIT shown, unbalanced form blocked (0.01 off), controller drafts →
+  owner approves → viewer shows both people and a verified hash, hard close → two-person reopen,
+  sealed period locked, LAST_OWNER shown, audit export intact, bookkeeper denied export, phone width
+  without horizontal scroll, no page errors.
 - Cash property run: 600 random documents (bills, COD, payroll, invoices with tax, credit memos),
   885 applications, 441 undone, 313 over-applications refused; every cash-view date balances, tie-out
   difference 0.0000 for each month and both together, TB and balance sheet balance on both bases.
@@ -201,6 +237,10 @@ are mapped to `LedgerError.code` in TypeScript.
 | Manifest worker needs a tenant session | `verify_chain` / `take_manifest` now check the session tenant | Run the nightly worker as a per-tenant `service` member, or add a maintenance role |
 | Journal entry headers aren't location-scoped | Lines are filtered by `location_ids`; headers (memo) are tenant-wide | Phase 0 step 8 (admin console) if needed |
 | Changing an entity's calendar | Settings are fixed once periods exist; switching at a year boundary needs a conversion workflow | When a customer asks |
+| Tenant switching in the console | The JWT's tenant_id comes from a Supabase custom access token hook (not built); one tenant per login until then | Supabase deployment |
+| Member invite by email | Members are added by Supabase user id | Supabase deployment |
+| Evidence upload in the console | Drafts from the console are manual/opening; documents for other types attach via the API | Phase 1 evidence module |
+| Console e2e not in `npm test` | Needs a browser and two servers; run `npm run e2e:admin` in CI as its own job | CI setup |
 | Cash view is computed per request | Fine at Phase 0 volumes; spec calls for materialized balances refreshed on post | Week 10–11 tuning (1M run) |
 | Applications into closed periods | A prepaid or deposit applied after its payment's period closed is refused | CPA review (week 10–11) |
 | Applications aren't hash-chained | Each is in the hash-chained audit log; the verifier doesn't cross-check them yet | With the manifest worker |
