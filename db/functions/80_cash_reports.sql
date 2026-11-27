@@ -99,7 +99,7 @@ language sql stable security definer set search_path = pg_catalog, public, pg_te
     select f.entry_id, f.line_id, f.account_id, f.location_id, f.gdate view_date,
            f.cum_amt - coalesce(lag(f.cum_amt) over (partition by f.line_id order by f.gi), 0) amount
       from fixed f),
-  allowed as (select app.allowed_locations() locs)
+  allowed as materialized (select app.allowed_locations() locs)  -- once, not per row
   select x.entry_id, x.line_id, x.account_id, x.location_id, x.view_date, x.amount
     from (select e.entry_id, e.line_id, e.account_id, e.location_id, e.view_date, e.amount from emitted e
           union all
@@ -113,12 +113,15 @@ $$;
 create or replace function ledger.accrual_lines(p_entity uuid)
 returns table (entry_id uuid, line_id uuid, account_id uuid, location_id uuid, view_date date, amount numeric)
 language sql stable security definer set search_path = pg_catalog, public, pg_temp as $$
+  -- The scope is computed once: MATERIALIZED stops the planner inlining it back into a per-row
+  -- filter (app.allowed_locations() per row cost ~6 s at 70k lines).
+  with scope as materialized (select app.allowed_locations() locs,
+                        exists (select 1 from public.entity en where en.id = p_entity and en.tenant_id = app.current_tenant()) ok)
   select jl.entry_id, jl.id, jl.account_id, jl.location_id, je.entry_date, jl.debit - jl.credit
-    from ledger.journal_line jl
+    from scope, ledger.journal_line jl
     join ledger.journal_entry je on je.id = jl.entry_id
-   where jl.entity_id = p_entity
-     and exists (select 1 from public.entity en where en.id = p_entity and en.tenant_id = app.current_tenant())
-     and (app.allowed_locations() is null or jl.location_id = any(app.allowed_locations()))
+   where jl.entity_id = p_entity and scope.ok
+     and (scope.locs is null or jl.location_id = any(scope.locs))
 $$;
 
 -- Chooses one source: the planner cannot skip a SECURITY DEFINER function inside a UNION, so a
