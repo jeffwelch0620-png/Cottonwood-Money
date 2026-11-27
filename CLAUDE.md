@@ -76,9 +76,16 @@ approvals, journal (list, viewer, new draft, reversal), reports, periods, COA, e
 audit. `npm run e2e:admin` runs all console flows in a browser on a fresh seeded tenant.
 Next.js bakes API_URL (the /v1 proxy) into the build.
 
-## Next: Phase 0 step 9 (weeks 10–11)
-1M-entry property run, query tuning (incl. materialized balances for the cash view), CPA review of
-the COA template, close rules and reversal policy. Then step 10: exit-gate review (Build Spec §1).
+Step 9 (2026-11-27): CI (`.github/workflows/ci.yml`: ledger tests on Postgres 16, type checks,
+console build, browser e2e). 1M-entry exit-gate run PASS (`docs/exit-gate/1m-run.md`, rerun with
+`scripts/bulk-run.ts`). Tuning found by the runs: per-entry shape in apply_payment (index-friendly),
+procedural basis_lines, report scope computed once (MATERIALIZED CTE), journal_line entity index
+(0013). CPA review packet drafted (Claude Doc "Restaurant Ledger — CPA Review Packet"), awaiting a CPA.
+Stored (materialized) balances deferred pending owner decision: cash reports ~2.2 s at 100k entries
+per entity.
+
+## Next: Phase 0 step 10 — exit-gate review (Build Spec §1)
+Remaining gate item: CPA sign-off on the COA template, close rules and reversal policy.
 
 ## Test conventions (step 5+)
 - Every app_role session needs claims: `actAs(db, principalId)` in tests; `withSession()` in app code.
@@ -91,6 +98,9 @@ the COA template, close rules and reversal policy. Then step 10: exit-gate revie
 - API tests: `buildServer` + `app.inject` with HS256 tokens (tests/api.test.ts `as(fx, principal)`).
 - Two people = two sessions: a different creator is only accepted through `approve_draft`
   (`_post`'s `p_draft`); `post()` in tests routes caller≠creator through propose → approve.
+- Performance: run `BULK_N=200000 npx tsx scripts/bulk-run.ts` after changing posting or reports;
+  the report's first-vs-last window rate must stay flat. Avoid `x = p OR p IS NULL` filters and
+  per-row calls to app.* functions (materialize the scope once).
 - Console: client components only; `useApi` keys results by path; money via lib/money (Decimal).
   Run servers with setsid and kill the process group (next-server outlives npx).
 
