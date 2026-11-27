@@ -189,20 +189,21 @@ describe('gap 1: post_entry checks input.tenant_id = app.current_tenant()', () =
   });
 });
 
-describe('gap 2: allow_soft_close is honored only for the controller role', () => {
+describe('gap 2: allow_soft_close is honored only for owner and controller roles', () => {
   const soft = (f: Fixture) => dsj(f, { entry_date: '2026-10-12', allow_soft_close: true });
 
-  it('refuses the override from an integration, an owner and a bookkeeper', async () => {
+  it('refuses the override from an integration and a bookkeeper', async () => {
     await expectCode(post(db, soft(a), a.integration), 'SOFT_CLOSE_FORBIDDEN');
-    await expectCode(post(db, soft(a), a.user2), 'SOFT_CLOSE_FORBIDDEN');
     await expectCode(post(db, soft(a), a.clerk), 'SOFT_CLOSE_FORBIDDEN');
   });
 
-  it('accepts it from a controller and records the override in the audit log', async () => {
-    const r = await post(db, soft(a), a.user1);
-    const { rows } = await db.query(
-      `select detail from audit.event where action = 'ledger.post' and object_id = $1`, [r.id]);
-    expect(rows[0].detail).toMatchObject({ soft_close_override: true, posted_by: a.user1, approved_by: a.user1 });
+  it('accepts it from a controller and an owner, and records the override in the audit log', async () => {
+    for (const who of [a.user1, a.user2]) {
+      const r = await post(db, soft(a), who);
+      const { rows } = await db.query(
+        `select detail from audit.event where action = 'ledger.post' and object_id = $1`, [r.id]);
+      expect(rows[0].detail).toMatchObject({ soft_close_override: true, posted_by: who, approved_by: who });
+    }
   });
 });
 

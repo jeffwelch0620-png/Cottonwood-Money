@@ -46,11 +46,11 @@ shim) and 0006 (balance backstop runs as owner, so RLS can't hide lines from it)
 controller-only soft close, actor from session). 77/77 tests pass; ~426 posts/s on one entity.
 See README "Auth model" and "Known gaps".
 
-Owner decisions pending (made provisionally in step 5, reopen if wrong):
+Step 5 decisions (approved by owner 2026-11-27):
 - People need MFA (aal2) for ANY database access; `service` logins are exempt.
-- Sealing requires owner or controller; soft-close override is controller only (owner too?).
+- Sealing and the soft-close override: owner or controller.
 - Agents cannot post even their own entries; whoever posts an agent's entry becomes its approver.
-- The DB trusts claims set by the app (Supabase model) vs verifying the JWT in-DB.
+- The DB trusts claims set by the app (Supabase model), not in-DB JWT verification.
 
 ## Next: Phase 0 step 6 — fiscal calendars (4-4-5, 13-period)
 - Then steps 7–10 per the Phase 0 Build Spec §10 (cash/accrual views + reports, admin

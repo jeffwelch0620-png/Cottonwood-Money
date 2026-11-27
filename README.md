@@ -65,7 +65,7 @@ JWT (sub, tenant_id, aal) ─► app.current_member()   membership: user_id = au
                            └► caller principal      ─► principal.auth_user_id = auth.uid()
 
 post_entry:  input.tenant_id ≠ session tenant          → TENANT_MISMATCH
-             allow_soft_close from non-controller      → SOFT_CLOSE_FORBIDDEN
+             allow_soft_close from non-owner/controller → SOFT_CLOSE_FORBIDDEN
              caller = creator → no approver;  caller ≠ creator → approver = caller
              approved_by in input ≠ caller             → APPROVER_NOT_CALLER
              caller is an agent                        → AGENT_CANNOT_POST
@@ -75,7 +75,7 @@ post_entry:  input.tenant_id ≠ session tenant          → TENANT_MISMATCH
 seal_period(period): sealer = session principal; must be a person with owner/controller role
 ```
 
-Roles: `owner` (members/principals) · `controller` (COA, periods, soft-close posting, seal) ·
+Roles: `owner` (members/principals + everything a controller can do) · `controller` (COA, periods, soft-close posting, seal) ·
 `bookkeeper` / `manager` (post and approve within scope and limit) · `viewer` (read) ·
 `service` (machine login for an agent or integration principal; no MFA, never approves).
 Tenants are created only by `app.create_tenant()` (sign-up), which makes the caller owner.

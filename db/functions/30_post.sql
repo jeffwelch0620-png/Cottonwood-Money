@@ -147,8 +147,8 @@ begin
     raise exception 'NO_PERIOD: no fiscal period covers % for this entity', v_date;
   end if;
   if v_period.status = 'soft' and coalesce((p->>'allow_soft_close')::boolean, false) then
-    if v_member.role <> 'controller' then
-      raise exception 'SOFT_CLOSE_FORBIDDEN: only a controller can post into a soft-closed period';
+    if v_member.role not in ('owner', 'controller') then
+      raise exception 'SOFT_CLOSE_FORBIDDEN: only an owner or controller can post into a soft-closed period';
     end if;
     v_soft := true;
   end if;
