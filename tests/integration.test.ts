@@ -468,6 +468,18 @@ describe('function ownership', () => {
   });
 });
 
+describe('upgrade', () => {
+  it('re-running migrations on a database whose integration functions belong to the migration login', async () => {
+    await su.query('alter function integration.claim_job(text, int) owner to postgres');
+    await su.query('alter function integration.register_evidence(jsonb) owner to postgres');
+    const { migrate } = await import('../db/migrate.js');
+    await migrate(TEST_URL);
+    const { rows } = await su.query(`select pg_get_userbyid(proowner) o, count(*)::int n from pg_proc
+                                      where pronamespace = 'integration'::regnamespace group by 1`);
+    expect(rows).toEqual([{ o: 'ledger_owner', n: expect.any(Number) }]);
+  });
+});
+
 describe('nightly manifest export', () => {
   it('records each entity chain head and verification in a locked evidence file', async () => {
     await actAs(db, f.user2);

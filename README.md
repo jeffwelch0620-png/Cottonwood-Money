@@ -260,8 +260,8 @@ conditions met; the CPA review is provisionally approved by the owner, with the 
   balanced on every date, tie-out difference 0.0000. Posting 858 entries/s across 10 entities.
 - CI on every pull request: ledger tests on Postgres 16, type checks, console build, browser e2e.
 
-- 179 / 179 tests pass on a fresh database; TypeScript type check clean.
-- Step 1.1: 29 integration tests (re-sync posts nothing twice; evidence insert-only and 7-year floor;
+- 180 / 180 tests pass on a fresh database; TypeScript type check clean.
+- Step 1.1: 30 integration tests (re-sync posts nothing twice; evidence insert-only and 7-year floor;
   WORM store and S3 request shape; secrets unreadable by every app login; retries → dead with each
   attempt's error; lease expiry; 4 parallel workers × 12 jobs, each run exactly once; manifest export
   detects a tampered chain). The RLS guard now covers the `integration` schema.

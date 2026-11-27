@@ -11,6 +11,18 @@
 
 -- Owned by ledger_owner like every other function file: SECURITY DEFINER runs with the owner's
 -- rights, never the migration login's (superuser locally).
+-- Upgrade path: a database migrated before this rule has integration functions owned by the
+-- migration login; hand them to ledger_owner first, or CREATE OR REPLACE below would fail.
+do $$
+declare f regprocedure;
+begin
+  for f in select p.oid::regprocedure from pg_proc p
+            where p.pronamespace = 'integration'::regnamespace
+              and p.proowner <> 'ledger_owner'::regrole loop
+    execute format('alter function %s owner to ledger_owner', f);
+  end loop;
+end $$;
+
 set role ledger_owner;
 
 -- Caller helpers ---------------------------------------------------------------------------

@@ -95,7 +95,7 @@ Step 1.1 done (2026-11-27): migration 0015 + `db/functions/50_integration.sql` +
 only by `worker_role` holding the job lease, Postgres job queue (leases, SKIP LOCKED, 5 attempts →
 dead, insert-only attempt log), repeat-safe sync runs, content-addressed evidence in S3 Object Lock
 (7-year floor; an existing object's lock is extended before it is recorded), leases renewed while a
-handler runs, nightly manifest export. 179/179 tests. See README "Integration base".
+handler runs, nightly manifest export. 180/180 tests. See README "Integration base".
 Step 1.0 (Supabase/Render/AWS accounts) waits on the owner; S3 is tested at the request level until then.
 Next: step 1.2 (Toast daily sales) — needs the pilot store and Toast API access (owner inputs).
 
