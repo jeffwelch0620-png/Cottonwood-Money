@@ -241,6 +241,11 @@ begin
     if exists (select 1 from ledger.journal_entry where reverses_id = v_orig.id) then
       raise exception 'ALREADY_REVERSED: entry % already has a reversal', v_orig.id;
     end if;
+    -- A payment or document that still settles something would keep driving the cash view.
+    if (select coalesce(sum(amount), 0) from ledger.payment_application
+         where payment_entry_id = v_orig.id or document_entry_id = v_orig.id) <> 0 then
+      raise exception 'HAS_APPLICATIONS: entry % still has payment applications; unapply them first', v_orig.seq;
+    end if;
     if exists (
          (select account_id, location_id, debit, credit, dims from ledger.journal_line where entry_id = v_orig.id
           except all

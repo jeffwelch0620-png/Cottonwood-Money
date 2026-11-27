@@ -27,7 +27,8 @@ export async function trialBalance(db: ClientBase, entityId: string, from: strin
     opening: dec(r.opening), debits: dec(r.debits), credits: dec(r.credits), closing: dec(r.closing),
   }));
   const totals = { debits: sum(lines.map((l) => l.debits)), credits: sum(lines.map((l) => l.credits)), closing: sum(lines.map((l) => l.closing)) };
-  return { basis: (rows[0]?.basis as Basis) ?? basis ?? null, lines, totals, balanced: totals.debits.eq(totals.credits) && totals.closing.isZero() };
+  const resolved = (rows[0]?.basis as Basis | undefined) ?? (await resolveBasis(db, entityId, basis));
+  return { basis: resolved, lines, totals, balanced: totals.debits.eq(totals.credits) && totals.closing.isZero() };
 }
 
 export async function profitAndLoss(db: ClientBase, entityId: string, from: string, to: string, opts: { basis?: Basis; locationId?: string } = {}) {
@@ -46,7 +47,8 @@ export async function balanceSheet(db: ClientBase, entityId: string, asOf: strin
   const assets = sum(lines.filter((l) => l.section === 'asset').map((l) => l.amount));
   const liabilities = sum(lines.filter((l) => l.section === 'liability').map((l) => l.amount));
   const equity = sum(lines.filter((l) => l.section === 'equity').map((l) => l.amount));
-  return { basis: rows[0]?.basis as Basis, lines, assets, liabilities, equity, balanced: assets.eq(liabilities.plus(equity)) };
+  const resolved = (rows[0]?.basis as Basis | undefined) ?? (await resolveBasis(db, entityId, basis));
+  return { basis: resolved, lines, assets, liabilities, equity, balanced: assets.eq(liabilities.plus(equity)) };
 }
 
 export async function cashAccrualTieOut(db: ClientBase, entityId: string, from: string, to: string) {

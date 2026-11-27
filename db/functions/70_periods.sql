@@ -68,7 +68,9 @@ declare
   v_max    int;
   i        int;
 begin
-  select * into e from public.entity where id = p_entity and tenant_id = app.current_tenant();
+  -- Row lock first: a concurrent calendar change either commits before we read, or waits for us
+  -- (and then sees our periods and is refused by entity_guard).
+  select * into e from public.entity where id = p_entity and tenant_id = app.current_tenant() for update;
   if not found then
     raise exception 'UNKNOWN_ENTITY: entity % is not in your tenant', p_entity;
   end if;
@@ -83,6 +85,11 @@ begin
   end if;
   if v_min is not null and p_year not in (v_min - 1, v_max + 1) then
     raise exception 'FISCAL_YEAR_GAP: fiscal years must be contiguous (next is % or %)', v_min - 1, v_max + 1;
+  end if;
+  -- New periods are open; putting them before a closed period would break the date-order rule
+  -- and let prior-year postings change closed or sealed balances.
+  if p_year = v_min - 1 and (select status from public.period where entity_id = p_entity order by start_date limit 1) <> 'open' then
+    raise exception 'BACKFILL_CLOSED: the earliest existing period is closed; history import needs its own workflow';
   end if;
 
   v_start := ledger.fy_end(e, p_year - 1) + 1;

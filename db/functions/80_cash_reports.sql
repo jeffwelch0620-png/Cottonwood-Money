@@ -238,7 +238,7 @@ begin
                                               and ac.cash_view <> 'always'), 0) wcc
       from b join public.account ac on ac.id = b.account_id),
   d as (
-    select coalesce(jsonb_object_agg(z.number, jsonb_build_object('name', z.name, 'accrual', z.acc, 'cash', z.cash)), '{}') j
+    select coalesce(jsonb_object_agg(z.number, jsonb_build_object('name', z.name, 'accrual', z.acc::text, 'cash', z.cash::text)), '{}') j
       from (select ac.number, ac.name,
                    coalesce(sum(b.amount) filter (where b.basis = 'accrual'), 0) acc,
                    coalesce(sum(b.amount) filter (where b.basis = 'cash'), 0) cash
@@ -328,6 +328,11 @@ begin
   end if;
   perform pg_advisory_xact_lock(hashtextextended('ledger:' || doc.entity_id::text, 0));
 
+  if pay.source_type = 'reversal' or doc.source_type = 'reversal'
+     or exists (select 1 from ledger.journal_entry where reverses_id in (pay.id, doc.id)) then
+    raise exception 'ENTRY_REVERSED: reversed entries and reversals cannot be applied';
+  end if;
+
   select * into sh from ledger._entry_shape(doc.entity_id) x where x.entry_id = doc.id;
   if not sh.is_doc then
     raise exception 'NOT_A_DOCUMENT: entry % has no open AR/AP balance to settle', doc.seq;
@@ -349,8 +354,17 @@ begin
   if v_pnet = 0 or sign(v_pnet) <> -v_sigma then
     raise exception 'NOT_A_PAYMENT: entry % does not clear the document''s AR/AP account', pay.seq;
   end if;
-  select abs(v_pnet) - coalesce(sum(amount), 0) into v_cap
-    from ledger.payment_application where payment_entry_id = pay.id or document_entry_id = pay.id;
+  -- Capacity is tracked per funding account: count only what this payment already settled on
+  -- documents funded through any of the same accounts (or settled against it as a document).
+  select abs(v_pnet) - coalesce(sum(pa.amount), 0) into v_cap
+    from ledger.payment_application pa
+   where pa.document_entry_id = pay.id
+      or (pa.payment_entry_id = pay.id and exists (
+            select 1 from ledger.journal_line l1 join public.account a1 on a1.id = l1.account_id
+             where l1.entry_id = pa.document_entry_id and a1.cash_view = 'never'
+               and l1.account_id in (select l2.account_id from ledger.journal_line l2 join public.account a2 on a2.id = l2.account_id
+                                      where l2.entry_id = doc.id and a2.cash_view = 'never'
+                                        and sign(l2.debit - l2.credit) = v_sigma)));
 
   if p_amount > v_open then
     raise exception 'OVER_APPLIED: document has % open, % requested', v_open, p_amount;

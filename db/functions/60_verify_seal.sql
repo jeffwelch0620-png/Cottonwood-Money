@@ -73,8 +73,11 @@ declare
   pr public.period; h bytea; v_kind text;
   p_actor uuid := app.current_principal();
 begin
-  select * into pr from public.period where id = p_period and tenant_id = app.current_tenant() for update;
+  -- Lock order everywhere: entity posting lock, then the period row (avoids deadlocks with close/reopen).
+  select * into pr from public.period where id = p_period and tenant_id = app.current_tenant();
   if not found then raise exception 'NO_PERIOD: %', p_period; end if;
+  perform pg_advisory_xact_lock(hashtextextended('ledger:' || pr.entity_id::text, 0));
+  select * into pr from public.period where id = p_period for update;
   if pr.status <> 'hard' then
     raise exception 'PERIOD_NOT_HARD: only hard-closed periods can be sealed (is %)', pr.status;
   end if;
@@ -85,7 +88,6 @@ begin
   if not app.has_role('owner', 'controller') then
     raise exception 'ROLE_FORBIDDEN: only an owner or controller can seal a period';
   end if;
-  perform pg_advisory_xact_lock(hashtextextended('ledger:' || pr.entity_id::text, 0));
   if exists (select 1 from public.period
               where entity_id = pr.entity_id and end_date < pr.start_date and status <> 'sealed') then
     raise exception 'CLOSE_ORDER: every earlier period must be sealed first';

@@ -1,6 +1,6 @@
 'use client';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useApi } from '@/lib/api';
 import { useSession } from '@/lib/session';
 import { fmt } from '@/lib/money';
@@ -11,6 +11,7 @@ export default function Journal() {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [before, setBefore] = useState<number | null>(null);
+  useEffect(() => setBefore(null), [entity?.id]); // each entity has its own sequence
   const qs = new URLSearchParams({ limit: '50', ...(entity ? { entity_id: entity.id } : {}), ...(from ? { from } : {}), ...(to ? { to } : {}), ...(before ? { before_seq: String(before) } : {}) });
   const list = useApi<any[]>(entity ? `/v1/entries?${qs}` : null);
 
