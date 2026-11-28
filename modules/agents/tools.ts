@@ -69,13 +69,16 @@ export const readEntries: AgentTool = {
   },
   async run(ctx, input) {
     const rows = (await ctx.db.query(
-      `select e.id, e.seq, e.entry_date, e.source_type, e.memo,
-              coalesce(jsonb_agg(jsonb_build_object('account_id', l.account_id, 'location_id', l.location_id,
-                                 'debit', l.debit::text, 'credit', l.credit::text) order by l.line_no)
-                       filter (where l.entry_id is not null), '[]') lines
-         from ledger.journal_entry e left join ledger.journal_line l on l.entry_id = e.id
-        where e.entity_id = $1 and e.entry_date between $2::date and $3::date
-        group by e.id order by e.entry_date desc, e.seq desc limit 50`,
+      // The 50 headers first, then lines for just those (not the whole date range).
+      `with e as materialized (
+         select id, seq, entry_date, source_type, memo from ledger.journal_entry
+          where entity_id = $1 and entry_date between $2::date and $3::date
+          order by entry_date desc, seq desc limit 50)
+       select e.id, e.seq, e.entry_date, e.source_type, e.memo,
+              coalesce((select jsonb_agg(jsonb_build_object('account_id', l.account_id, 'location_id', l.location_id,
+                                         'debit', l.debit::text, 'credit', l.credit::text) order by l.line_no)
+                          from ledger.journal_line l where l.entry_id = e.id), '[]') lines
+         from e order by e.entry_date desc, e.seq desc`,
       [input.entity_id, input.from, input.to])).rows;
     ctx.refs.push(...rows.map((r) => r.id as string));
     return rows;
