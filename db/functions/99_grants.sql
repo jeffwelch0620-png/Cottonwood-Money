@@ -56,3 +56,15 @@ grant execute on function integration.heartbeat_job(uuid, text, int)          to
 grant execute on function integration.complete_job(uuid, text, jsonb)         to worker_role;
 grant execute on function integration.fail_job(uuid, text, text, int)         to worker_role;
 grant execute on function integration.read_secret(uuid, text)                 to worker_role;
+
+-- Agents (Phase 1 step 1.2).
+revoke execute on all functions in schema agents from public;
+grant execute on function agents.known_tools()                          to app_role;
+grant execute on function agents.create_agent(jsonb)                    to app_role;
+grant execute on function agents.set_agent_tools(uuid, text[])          to app_role;
+grant execute on function agents.set_agent_policy(uuid, jsonb)          to app_role;
+grant execute on function agents.set_agent_enabled(uuid, boolean, text) to app_role;
+grant execute on function agents.start_run(text)                        to app_role;
+grant execute on function agents.finish_run(uuid, text, jsonb, text)    to app_role;
+grant execute on function agents.log_model_call(uuid, jsonb)            to app_role;
+grant execute on function agents.authorize_tool(uuid, text, jsonb, uuid) to app_role;

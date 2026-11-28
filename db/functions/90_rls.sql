@@ -149,3 +149,24 @@ begin
 end $$;
 drop policy if exists connector_secret_none on integration.connector_secret;
 create policy connector_secret_none on integration.connector_secret to app_role using (false) with check (false);
+
+-- 9. Agents (Phase 1 step 1.2): members read their tenant's agents, policies, runs and logs.
+do $$
+declare t text;
+begin
+  foreach t in array array['agent','agent_tool','agent_policy','agent_run','model_call','tool_call',
+                           'agent_proposal','agent_correction'] loop
+    execute format('alter table agents.%I enable row level security', t);
+    execute format('drop policy if exists %1$s_read on agents.%1$I', t);
+    execute format('create policy %1$s_read on agents.%1$I for select to app_role
+                      using (tenant_id = (select app.current_tenant()))', t);
+  end loop;
+end $$;
+-- Model output and corrections carry whole draft entries (any location), so only members who see
+-- every location may read them; a location-limited member sees drafts through je_draft_read.
+drop policy if exists model_call_read on agents.model_call;
+create policy model_call_read on agents.model_call for select to app_role
+  using (tenant_id = (select app.current_tenant()) and (select app.allowed_locations()) is null);
+drop policy if exists agent_correction_read on agents.agent_correction;
+create policy agent_correction_read on agents.agent_correction for select to app_role
+  using (tenant_id = (select app.current_tenant()) and (select app.allowed_locations()) is null);

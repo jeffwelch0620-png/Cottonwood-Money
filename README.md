@@ -52,8 +52,10 @@ db/migrations/   0000 roles · 0001 tenancy/COA/periods · 0002 evidence/audit �
                  0009 JE drafts, last-owner rule, setup audit trail · 0010 cash_view fixed once posted
                  0011–0014 review fixes, journal_line entity index, no PUBLIC EXECUTE by default
                  0015 integration schema: connectors, secrets, job queue, sync runs, evidence objects
+                 0016 agents schema: agents, allow-lists, policies, runs, model/tool call logs, corrections
 db/functions/    session identity (app.*) · audit chain · canonical form + hash · post_entry ·
                  integration (connectors, write-only secrets, queue, sync runs, evidence) ·
+                 agents (allow-lists, policy checks, kill switch, call logs, corrections) ·
                  reverse/intercompany · verify/manifest/seal · periods/close/reopen ·
                  cash view + reports + payment application · admin (drafts, COA template,
                  JE viewer, audit export) · RLS policies · grants
@@ -67,9 +69,10 @@ modules/ledger/  TypeScript entry points + typed LedgerError codes
 modules/auth/    withSession(): verified JWT claims set per transaction
 modules/integration/ Worker · evidence stores (S3 Object Lock, in-memory WORM) · secret sealing ·
                  repeat-safe sync runs · sample POS and manifest-export connectors
+modules/agents/  AgentRuntime (tool loop) · AnthropicModelClient / SimulatedModel · cost table · agent tools
 modules/reporting/ trialBalance · profitAndLoss · balanceSheet · cashAccrualTieOut (Decimal totals)
 tests/           invariants · immutability · idempotency/concurrency · tamper · property · module · auth-rls ·
-                 periods · cash-accrual · admin · api · integration
+                 periods · cash-accrual · admin · api · integration · agents
 ```
 
 ## What the database enforces
@@ -248,6 +251,37 @@ showing it is kept). Worker env: `DATABASE_URL`, `CONNECTOR_KEYS=id:base64(32 by
 The S3 adapter is tested at the request level (lock mode, retain-until, no-overwrite, checksum,
 412 handling), not yet against a live bucket: that waits for the AWS account (Phase 1 owner inputs).
 
+## Agent runtime (Phase 1 step 1.2)
+
+L1: agents propose; people approve. An agent is an `agent` principal with a `service` login, registered
+in `agents.agent` by an owner or controller (a person).
+
+```
+ start_run ──▶ model call ──▶ log_model_call ──▶ authorize_tool(tool) ──▶ tool, in the agent's session
+ (refused if      (Claude, or      (insert-only:       (allow-list + kill        propose_entry → DB checks
+  switched off)    simulated)       model, version,     switch; every call        allow-list, kill switch,
+                                    prompt hash,        recorded, allowed or      cited model call, policy
+                                    tokens, cost)       refused)                  → draft for a person
+     ▲                                                                                   │
+     └──────────────────────────── tool results back to the model ◀──────────────────────┘
+ ends: end_turn → succeeded · refusal → refused · kill switch → stopped · model error / max turns → failed
+```
+
+| Rule | How the database enforces it |
+|---|---|
+| Tools only from the allow-list | `authorize_tool` refuses and records anything off the list (`TOOL_NOT_ALLOWED`); the model is shown only allowed tools. `propose_entry` re-checks the list for agent callers, so bypassing the runtime doesn't help. Lists can only name agent tools (`UNKNOWN_TOOL`): nothing that touches the chart of accounts, policies, users or permissions exists as a tool |
+| Proposals inside policy | For an agent caller, `propose_entry` checks total ≤ `max_amount`, accounts, locations, source types, vendor and `confidence ≥ min_confidence` (`POLICY_*`). No policy → `NO_POLICY` (deny by default). Policies can't allow reversals, intercompany or opening entries |
+| Kill switch, immediately | `set_agent_enabled(false)` takes the agent row lock; proposals, tool calls and run starts read it under a share lock. A proposal in flight waits for the switch and is refused when it commits (`AGENT_DISABLED`); the race test proves the wait, and fails if the lock is removed |
+| Every model call logged | `log_model_call` before the output is used: model, answering version, SHA-256 of the request, input ids, output, stop reason, tokens, cost (NUMERIC(19,4), from list prices). Failed calls too. A proposal must cite a successful call of its own running run (`MODEL_CALL_MISSING`, `NO_RUN`, `RUN_FINISHED`). Insert-only |
+| Logs respect location scope | Model output and corrections hold whole drafts, so only members who see every location can read them; a location-limited member sees drafts through `je_draft_read` |
+| Malformed policies are refused | Each policy list is absent/null (no restriction) or an array of strings (`BAD_POLICY` otherwise); comparisons treat unknowns as outside the policy |
+| Decisions become examples | A trigger on draft decisions records `approved` / `rejected` (with the reason); a person's corrected draft (`corrects_draft_id`) records `corrected` with the field-level diff. An agent withdrawing its own draft is not recorded |
+| Agents can't manage themselves | Agent management needs an owner/controller who is a person (`ROLE_FORBIDDEN`); agent tables are read-only to `app_role` |
+
+Model calls use Claude Opus 5.5 (`claude-opus-5-5`) by default (per agent), adaptive thinking, explicit
+effort, and server-side refusal fallbacks (`fallbacks: "default"`). Until an Anthropic API key is set,
+runs use `SimulatedModel`; the live client is type-checked but not yet exercised.
+
 ## Exit gate
 
 Phase 0 exit-gate review: [`docs/exit-gate/README.md`](docs/exit-gate/README.md). Five of six
@@ -260,7 +294,10 @@ conditions met; the CPA review is provisionally approved by the owner, with the 
   balanced on every date, tie-out difference 0.0000. Posting 858 entries/s across 10 entities.
 - CI on every pull request: ledger tests on Postgres 16, type checks, console build, browser e2e.
 
-- 180 / 180 tests pass on a fresh database; TypeScript type check clean.
+- 212 / 212 tests pass on a fresh database; TypeScript type check clean.
+- Step 1.2: 32 agent tests (allow-list in runtime and DB; 8 policy refusals; kill switch before, during
+  and racing a run; model-call log with tokens and cost to the cent; corrections with diffs). Mutation
+  checks: dropping the kill-switch row lock or the amount check each fails its test.
 - Step 1.1: 30 integration tests (re-sync posts nothing twice; evidence insert-only and 7-year floor;
   WORM store and S3 request shape; secrets unreadable by every app login; retries → dead with each
   attempt's error; lease expiry; 4 parallel workers × 12 jobs, each run exactly once; manifest export
@@ -306,7 +343,10 @@ conditions met; the CPA review is provisionally approved by the owner, with the 
 | Sealing doesn't anchor externally | Seal hash is stored; optional external timestamp anchor (Product Spec) not built | With the manifest export worker |
 | Manifest export not yet emailed to the owner | The nightly manifest is written to locked storage (step 1.1); the owner copy by email isn't built | Phase 1 notifications |
 | S3 Object Lock not yet exercised live | Adapter tested at the request level; needs the AWS account and a bucket with Object Lock | Phase 1 step 1.0 (accounts) |
-| Nightly schedule uses the UTC day | Business days are per location time zone (Toast) | Step 1.2 (Toast daily sales) |
-| Connectors have no console page or API routes yet | Created and run through the database functions and the worker | Step 1.2 (with the Toast connector) |
+| Nightly schedule uses the UTC day | Business days are per location time zone (Toast) | Step 1.3 (Toast daily sales) |
+| Read tools are allow-listed by the runtime, not the database | Reads run under the agent's row security either way; writes (`propose_entry`) are refused by the database | If an agent needs data outside its tenant view |
+| Live Claude calls not yet exercised | No Anthropic API key yet; `AnthropicModelClient` is type-checked, runs use `SimulatedModel` | When the key arrives (Phase 1 owner inputs) |
+| Agents aren't triggered by jobs yet | Runs start from code; the worker job kind for agent runs comes with the first agent | Step 1.3 (sales agent) |
+| Connectors have no console page or API routes yet | Created and run through the database functions and the worker | Step 1.3 (with the Toast connector) |
 | Audit chain serializes all postings in a tenant | Fine at restaurant volumes (~400/s measured per entity) | Revisit if a tenant exceeds it |
 | Reversing an intercompany pair | Needs a paired reversal function | Phase 1 |
