@@ -57,6 +57,31 @@ export const readEvidence: AgentTool = {
   },
 };
 
+export const readEntries: AgentTool = {
+  definition: {
+    name: 'read_entries',
+    description: 'List posted journal entries of an entity between two dates (at most 50, newest first), with their lines.',
+    input_schema: obj({
+      entity_id: { type: 'string' },
+      from: { type: 'string', description: 'YYYY-MM-DD' },
+      to: { type: 'string', description: 'YYYY-MM-DD' },
+    }, ['entity_id', 'from', 'to']),
+  },
+  async run(ctx, input) {
+    const rows = (await ctx.db.query(
+      `select e.id, e.seq, e.entry_date, e.source_type, e.memo,
+              coalesce(jsonb_agg(jsonb_build_object('account_id', l.account_id, 'location_id', l.location_id,
+                                 'debit', l.debit::text, 'credit', l.credit::text) order by l.line_no)
+                       filter (where l.entry_id is not null), '[]') lines
+         from ledger.journal_entry e left join ledger.journal_line l on l.entry_id = e.id
+        where e.entity_id = $1 and e.entry_date between $2::date and $3::date
+        group by e.id order by e.entry_date desc, e.seq desc limit 50`,
+      [input.entity_id, input.from, input.to])).rows;
+    ctx.refs.push(...rows.map((r) => r.id as string));
+    return rows;
+  },
+};
+
 export const proposeEntry: AgentTool = {
   definition: {
     name: 'propose_entry',
@@ -93,4 +118,5 @@ export const proposeEntry: AgentTool = {
   },
 };
 
-export const standardTools: AgentTool[] = [readAccounts, readLocations, readEvidence, proposeEntry];
+/** One implementation for every name in agents.known_tools() (tests check they match). */
+export const standardTools: AgentTool[] = [readAccounts, readLocations, readEntries, readEvidence, proposeEntry];

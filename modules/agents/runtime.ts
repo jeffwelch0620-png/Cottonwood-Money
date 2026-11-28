@@ -73,6 +73,23 @@ export class AgentRuntime {
       return result;
     };
 
+    try {
+      return await this.loop(who, input, { runId, agent, tools, byName, messages, refs, result, finish,
+        addCost: (c) => { cost = cost.plus(c); } });
+    } catch (err) {
+      // Anything unexpected still closes the run, so none is left 'running'.
+      const msg = (err as Error).message || String(err);
+      await finish('failed', `RUNTIME_ERROR: ${msg}`).catch(() => undefined);
+      throw err;
+    }
+  }
+
+  private async loop(who: AgentIdentity, input: RunInput, s: {
+    runId: string; agent: { model: string }; tools: AgentTool[]; byName: Map<string, AgentTool>; messages: MessageParam[];
+    refs: string[]; result: RunResult; finish: (status: RunResult['status'], error?: string) => Promise<RunResult>;
+    addCost: (c: ReturnType<typeof callCost>) => void;
+  }): Promise<RunResult> {
+    const { runId, agent, tools, byName, messages, refs, result, finish } = s;
     for (let turn = 1; turn <= (input.maxTurns ?? 10); turn++) {
       result.turns = turn;
       const req = {
@@ -89,7 +106,7 @@ export class AgentRuntime {
         return finish('failed', `MODEL_ERROR: ${msg}`);
       }
       const c = callCost(req.model, res.usage);
-      cost = cost.plus(c);
+      s.addCost(c);
       // Logged before any of the output is acted on.
       const modelCallId = await this.logCall(who, runId, req, refs, {
         status: 'ok', model_version: res.model, output: res.content, stop_reason: res.stop_reason,
@@ -118,9 +135,10 @@ export class AgentRuntime {
           results.push({ type: 'tool_result', tool_use_id: call.id, is_error: true, content: `${auth.refusal}: ${call.name} is not available to you` });
           continue;
         }
-        const tool = byName.get(call.name)!;
-        const missing = ((tool.definition.input_schema as any).required ?? []).filter((k: string) => !(k in input));
+        const tool = byName.get(call.name);
         try {
+          if (!tool) throw new Error(`NO_IMPLEMENTATION: ${call.name} is allowed but this runtime has no implementation`);
+          const missing = ((tool.definition.input_schema as any).required ?? []).filter((k: string) => !(k in input));
           if (missing.length) throw new Error(`BAD_INPUT: missing ${missing.join(', ')}`);
           const out = await this.as(who, (db) => tool.run({ db, tenantId: who.tenantId, runId, modelCallId, refs } satisfies ToolContext, input));
           if (call.name === 'propose_entry') result.proposals.push((out as any).draft_id);

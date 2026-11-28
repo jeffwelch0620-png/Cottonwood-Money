@@ -105,7 +105,7 @@ Registered agents (agent principal + service login), tool allow-lists (`authoriz
 propose_entry), per-agent policy (amount/account/location/source/vendor/confidence, deny by default),
 kill switch under a row lock, insert-only model/tool call logs (proposals must cite a logged call),
 corrections as labeled examples. Runs use `SimulatedModel` until an Anthropic API key exists.
-207/207 tests. See README "Agent runtime".
+212/212 tests. See README "Agent runtime".
 Next: 1.3 (Toast daily sales and tips; depends on 1.1 + 1.2) — needs Toast API access for Rudd's.
 
 ## Test conventions (step 5+)

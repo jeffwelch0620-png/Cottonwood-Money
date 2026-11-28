@@ -95,19 +95,30 @@ begin
                        jsonb_build_object('tools', to_jsonb(coalesce(p_tools, '{}'))));
 end $$;
 
+-- A policy list: absent or JSON null = no restriction; otherwise an array of non-null strings.
+-- Anything else is refused, so a malformed list can never widen a policy by turning into NULL.
+create or replace function agents._policy_list(p jsonb, k text) returns text[]
+language plpgsql immutable set search_path = pg_catalog as $$
+begin
+  if not p ? k or jsonb_typeof(p->k) = 'null' then return null; end if;
+  if jsonb_typeof(p->k) <> 'array' then
+    raise exception 'BAD_POLICY: % must be a list', k;
+  end if;
+  if exists (select 1 from jsonb_array_elements(p->k) e where jsonb_typeof(e) <> 'string') then
+    raise exception 'BAD_POLICY: % may contain only non-empty ids or names', k;
+  end if;
+  return array(select jsonb_array_elements_text(p->k));
+end $$;
+
 create or replace function agents.set_agent_policy(p_agent uuid, p jsonb) returns void
 language plpgsql security definer set search_path = pg_catalog, public, pg_temp as $$
 declare
   m public.membership := agents._require_admin();
   a agents.agent := agents._agent_of_tenant(p_agent, m.tenant_id, true);
-  v_accounts  uuid[] := case when p ? 'allowed_account_ids' and jsonb_typeof(p->'allowed_account_ids') = 'array'
-                             then array(select jsonb_array_elements_text(p->'allowed_account_ids'))::uuid[] end;
-  v_locations uuid[] := case when p ? 'allowed_location_ids' and jsonb_typeof(p->'allowed_location_ids') = 'array'
-                             then array(select jsonb_array_elements_text(p->'allowed_location_ids'))::uuid[] end;
-  v_vendors   uuid[] := case when p ? 'allowed_vendor_ids' and jsonb_typeof(p->'allowed_vendor_ids') = 'array'
-                             then array(select jsonb_array_elements_text(p->'allowed_vendor_ids'))::uuid[] end;
-  v_sources   text[] := case when jsonb_typeof(p->'allowed_source_types') = 'array'
-                             then array(select jsonb_array_elements_text(p->'allowed_source_types')) end;
+  v_accounts  uuid[] := agents._policy_list(p, 'allowed_account_ids')::uuid[];
+  v_locations uuid[] := agents._policy_list(p, 'allowed_location_ids')::uuid[];
+  v_vendors   uuid[] := agents._policy_list(p, 'allowed_vendor_ids')::uuid[];
+  v_sources   text[] := agents._policy_list(p, 'allowed_source_types');
 begin
   if (p->>'max_amount') is null or (p->>'min_confidence') is null or v_sources is null then
     raise exception 'MISSING_FIELD: max_amount, min_confidence and allowed_source_types are required';
@@ -292,19 +303,19 @@ begin
   if p_total > pol.max_amount then
     raise exception 'POLICY_AMOUNT: proposal total % exceeds the agent limit %', p_total, pol.max_amount;
   end if;
-  if p->>'source_type' is null or not (p->>'source_type' = any (pol.allowed_source_types)) then
+  if not coalesce(p->>'source_type' = any (pol.allowed_source_types), false) then
     raise exception 'POLICY_SOURCE_TYPE: % is not a source type this agent may propose', p->>'source_type';
   end if;
   if pol.allowed_account_ids is not null and exists (
-       select 1 from jsonb_array_elements(p->'lines') l where (l->>'account_id')::uuid <> all (pol.allowed_account_ids)) then
+       select 1 from jsonb_array_elements(p->'lines') l where not coalesce((l->>'account_id')::uuid = any (pol.allowed_account_ids), false)) then
     raise exception 'POLICY_ACCOUNT: a line uses an account this agent may not propose to';
   end if;
   if pol.allowed_location_ids is not null and exists (
-       select 1 from jsonb_array_elements(p->'lines') l where (l->>'location_id')::uuid <> all (pol.allowed_location_ids)) then
+       select 1 from jsonb_array_elements(p->'lines') l where not coalesce((l->>'location_id')::uuid = any (pol.allowed_location_ids), false)) then
     raise exception 'POLICY_LOCATION: a line uses a location this agent may not propose for';
   end if;
   if pol.allowed_vendor_ids is not null and p->>'vendor_id' is not null
-     and (p->>'vendor_id')::uuid <> all (pol.allowed_vendor_ids) then
+     and not coalesce((p->>'vendor_id')::uuid = any (pol.allowed_vendor_ids), false) then
     raise exception 'POLICY_VENDOR: vendor % is outside this agent''s policy', p->>'vendor_id';
   end if;
 

@@ -162,3 +162,11 @@ begin
                       using (tenant_id = (select app.current_tenant()))', t);
   end loop;
 end $$;
+-- Model output and corrections carry whole draft entries (any location), so only members who see
+-- every location may read them; a location-limited member sees drafts through je_draft_read.
+drop policy if exists model_call_read on agents.model_call;
+create policy model_call_read on agents.model_call for select to app_role
+  using (tenant_id = (select app.current_tenant()) and (select app.allowed_locations()) is null);
+drop policy if exists agent_correction_read on agents.agent_correction;
+create policy agent_correction_read on agents.agent_correction for select to app_role
+  using (tenant_id = (select app.current_tenant()) and (select app.allowed_locations()) is null);

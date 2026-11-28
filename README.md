@@ -273,6 +273,8 @@ in `agents.agent` by an owner or controller (a person).
 | Proposals inside policy | For an agent caller, `propose_entry` checks total ≤ `max_amount`, accounts, locations, source types, vendor and `confidence ≥ min_confidence` (`POLICY_*`). No policy → `NO_POLICY` (deny by default). Policies can't allow reversals, intercompany or opening entries |
 | Kill switch, immediately | `set_agent_enabled(false)` takes the agent row lock; proposals, tool calls and run starts read it under a share lock. A proposal in flight waits for the switch and is refused when it commits (`AGENT_DISABLED`); the race test proves the wait, and fails if the lock is removed |
 | Every model call logged | `log_model_call` before the output is used: model, answering version, SHA-256 of the request, input ids, output, stop reason, tokens, cost (NUMERIC(19,4), from list prices). Failed calls too. A proposal must cite a successful call of its own running run (`MODEL_CALL_MISSING`, `NO_RUN`, `RUN_FINISHED`). Insert-only |
+| Logs respect location scope | Model output and corrections hold whole drafts, so only members who see every location can read them; a location-limited member sees drafts through `je_draft_read` |
+| Malformed policies are refused | Each policy list is absent/null (no restriction) or an array of strings (`BAD_POLICY` otherwise); comparisons treat unknowns as outside the policy |
 | Decisions become examples | A trigger on draft decisions records `approved` / `rejected` (with the reason); a person's corrected draft (`corrects_draft_id`) records `corrected` with the field-level diff. An agent withdrawing its own draft is not recorded |
 | Agents can't manage themselves | Agent management needs an owner/controller who is a person (`ROLE_FORBIDDEN`); agent tables are read-only to `app_role` |
 
@@ -292,8 +294,8 @@ conditions met; the CPA review is provisionally approved by the owner, with the 
   balanced on every date, tie-out difference 0.0000. Posting 858 entries/s across 10 entities.
 - CI on every pull request: ledger tests on Postgres 16, type checks, console build, browser e2e.
 
-- 207 / 207 tests pass on a fresh database; TypeScript type check clean.
-- Step 1.2: 27 agent tests (allow-list in runtime and DB; 8 policy refusals; kill switch before, during
+- 212 / 212 tests pass on a fresh database; TypeScript type check clean.
+- Step 1.2: 32 agent tests (allow-list in runtime and DB; 8 policy refusals; kill switch before, during
   and racing a run; model-call log with tokens and cost to the cent; corrections with diffs). Mutation
   checks: dropping the kill-switch row lock or the amount check each fails its test.
 - Step 1.1: 30 integration tests (re-sync posts nothing twice; evidence insert-only and 7-year floor;

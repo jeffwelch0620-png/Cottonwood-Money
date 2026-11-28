@@ -170,6 +170,18 @@ describe('2. proposals outside policy limits are refused by the database', () =>
     await expectCode(db.query('select agents.set_agent_policy($1, $2::jsonb)', [a.id, JSON.stringify({ ...policy(), allowed_source_types: ['ap_bill', 'reversal'] })]), 'BAD_SOURCE_TYPE');
   });
 
+  it('a malformed list is refused instead of silently meaning "no restriction"', async () => {
+    await actAs(db, f.user2);
+    const set = (over: Record<string, unknown>) => db.query('select agents.set_agent_policy($1, $2::jsonb)', [a.id, JSON.stringify({ ...policy(), ...over })]);
+    await expectCode(set({ allowed_account_ids: f.acct.cogs }), 'BAD_POLICY');            // a string, not a list
+    await expectCode(set({ allowed_source_types: ['ap_bill', null] }), 'BAD_POLICY');     // a null element
+    await expectCode(set({ allowed_location_ids: { a: f.locA1 } }), 'BAD_POLICY');
+    await expectCode(set({ allowed_source_types: 'ap_bill' }), 'BAD_POLICY');
+    // The policy in force is unchanged: still limited to ap_bill at store 1.
+    const pol = (await su.query('select allowed_source_types, allowed_location_ids from agents.agent_policy where agent_id = $1', [a.id])).rows[0];
+    expect(pol).toEqual({ allowed_source_types: ['ap_bill'], allowed_location_ids: [f.locA1] });
+  });
+
   it('through the runtime: the refusal goes back to the model as an error and nothing is drafted', async () => {
     const b = await newAgent(['propose_entry'], policy());
     const { model, rt } = runtime((_req, turn) => turn === 1
@@ -342,6 +354,56 @@ describe("people's decisions become labeled examples", () => {
     await db.query(`select ledger.reject_draft($1, 'withdrawn by the agent')`, [pending]);
     expect(await count(su, 'select count(*) n from agents.agent_correction where draft_id = $1', [pending])).toBe(0);
     await expectCode(propose(a.auth, bill({ agent: m, corrects_draft_id: pending })), 'ROLE_FORBIDDEN');
+  });
+});
+
+describe('location scope and runtime robustness', () => {
+  it('a member limited to some stores cannot read model output or corrections (they carry whole drafts)', async () => {
+    const a = await newAgent(['propose_entry'], policy());
+    const { run, mc } = await openRun(a.auth);
+    const d = await propose(a.auth, bill({ agent: { run_id: run, model_call_id: mc, confidence: 0.9 }, lines: [
+      { account_id: f.acct.cogs, location_id: f.locA1, debit: '50' }, { account_id: f.acct.ap, location_id: f.locA1, credit: '50' }] }));
+    await actAs(db, f.user1);
+    await db.query(`select ledger.reject_draft($1, 'scope test')`, [d]);
+    const seen = async (who: string) => {
+      await actAs(db, who);
+      return {
+        calls: await count(db, 'select count(*) n from agents.model_call where run_id = $1', [run]),
+        corrections: await count(db, 'select count(*) n from agents.agent_correction where draft_id = $1', [d]),
+      };
+    };
+    expect(await seen(f.user1)).toEqual({ calls: 1, corrections: 1 });   // all locations
+    expect(await seen(f.clerk)).toEqual({ calls: 0, corrections: 0 });   // store 1 only
+  });
+
+  it('every grantable tool has an implementation', () => {
+    return db.query('select agents.known_tools() t').then(({ rows }) =>
+      expect([...rows[0].t].sort()).toEqual(standardTools.map((t) => t.definition.name).sort()));
+  });
+
+  it('read_entries works, and an allowed tool without an implementation is an error result, not a stuck run', async () => {
+    const a = await newAgent(['read_entries', 'read_accounts'], policy());
+    let seen: any;
+    const model = new SimulatedModel((req, turn) => {
+      if (turn === 1) return { tool_calls: [{ name: 'read_entries', input: { entity_id: f.entityA, from: '2026-01-01', to: '2026-12-31' } }, { name: 'read_accounts', input: {} }] };
+      seen = req.messages[2].content;
+      return { text: 'done' };
+    });
+    const partial = new AgentRuntime({ pool, model, tools: standardTools.filter((t) => t.definition.name !== 'read_accounts') });
+    const r = await partial.run(a.who, task);
+    expect(r.status).toBe('succeeded');
+    expect(seen[0].is_error ?? false).toBe(false);
+    expect(Array.isArray(JSON.parse(seen[0].content))).toBe(true);
+    expect(seen[1]).toMatchObject({ is_error: true, content: expect.stringMatching(/^NO_IMPLEMENTATION/) });
+    expect((await su.query('select status from agents.agent_run where id = $1', [r.runId])).rows[0].status).toBe('succeeded');
+  });
+
+  it('an unexpected runtime error still closes the run as failed', async () => {
+    const a = await newAgent(['read_accounts'], policy());
+    const broken = { create: async () => ({ stop_reason: 'tool_use', content: null, usage: { input_tokens: 1, output_tokens: 1 }, model: 'x' }) } as any;
+    await expect(new AgentRuntime({ pool, model: broken, tools: standardTools }).run(a.who, task)).rejects.toThrow();
+    const run = (await su.query(`select status, error from agents.agent_run where agent_id = $1`, [a.id])).rows[0];
+    expect(run).toMatchObject({ status: 'failed', error: expect.stringMatching(/^RUNTIME_ERROR/) });
   });
 });
 
