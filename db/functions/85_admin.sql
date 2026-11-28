@@ -21,6 +21,8 @@ declare
   v_line   jsonb;
   v_id     uuid;
   v_payload jsonb;
+  v_prop   agents.agent_proposal;
+  v_orig   ledger.je_draft;
 begin
   if m.tenant_id is null then
     raise exception 'NOT_AUTHENTICATED: no verified, MFA-complete membership for this session';
@@ -77,8 +79,26 @@ begin
     raise exception 'UNBALANCED: debits % <> credits %', v_dr, v_cr;
   end if;
 
+  -- Agents (step 1.2): kill switch, allow-list, a logged model call and the policy limits.
+  if v_kind = 'agent' then
+    v_prop := agents._check_proposal(p, v_dr);
+  elsif p ? 'agent' then
+    raise exception 'BAD_INPUT: only agents send agent metadata';
+  end if;
+  -- A person correcting an agent's rejected draft: the difference becomes a labeled example.
+  if p ? 'corrects_draft_id' then
+    if v_kind <> 'user' then
+      raise exception 'ROLE_FORBIDDEN: only a person can correct an agent''s draft';
+    end if;
+    select * into v_orig from ledger.je_draft
+     where id = (p->>'corrects_draft_id')::uuid and tenant_id = m.tenant_id and state = 'rejected';
+    if not found or not exists (select 1 from agents.agent_proposal where draft_id = v_orig.id) then
+      raise exception 'BAD_CORRECTION: corrects_draft_id must be a rejected agent draft in your tenant';
+    end if;
+  end if;
+
   -- Store ids in canonical (lowercase) uuid form so scope checks compare like with like.
-  v_payload := (p - 'created_by' - 'actor_type' - 'idempotency_key' - 'lines')
+  v_payload := (p - 'created_by' - 'actor_type' - 'idempotency_key' - 'lines' - 'agent' - 'corrects_draft_id')
                || jsonb_build_object('created_by', v_actor, 'actor_type', v_kind,
                     'lines', (select jsonb_agg(l || jsonb_build_object('account_id', (l->>'account_id')::uuid::text,
                                                                        'location_id', (l->>'location_id')::uuid::text)
@@ -86,8 +106,22 @@ begin
                                 from jsonb_array_elements(v_lines) with ordinality as x(l, ord)));
   insert into ledger.je_draft (tenant_id, entity_id, payload, created_by)
   values (m.tenant_id, v_entity, v_payload, v_actor) returning id into v_id;
+  if v_kind = 'agent' then
+    insert into agents.agent_proposal (draft_id, tenant_id, agent_id, run_id, model_call_id, confidence)
+    values (v_id, v_prop.tenant_id, v_prop.agent_id, v_prop.run_id, v_prop.model_call_id, v_prop.confidence);
+  end if;
+  if v_orig.id is not null then
+    insert into agents.agent_correction (tenant_id, agent_id, agent_version, draft_id, outcome, proposed,
+                                         corrected_draft_id, corrected, diff, reason, decided_by)
+    select m.tenant_id, ag.id, ag.version, v_orig.id, 'corrected', v_orig.payload, v_id, v_payload,
+           agents._payload_diff(v_orig.payload, v_payload), v_orig.reason, v_actor
+      from agents.agent_proposal pr join agents.agent ag on ag.id = pr.agent_id
+     where pr.draft_id = v_orig.id;
+  end if;
   perform audit.append(m.tenant_id, v_kind, v_actor, 'draft.propose', 'je_draft', v_id,
-                       jsonb_build_object('source_type', p->>'source_type', 'total', v_dr::text));
+                       jsonb_build_object('source_type', p->>'source_type', 'total', v_dr::text)
+                       || case when v_kind = 'agent' then jsonb_build_object('run_id', v_prop.run_id,
+                            'model_call_id', v_prop.model_call_id, 'confidence', v_prop.confidence) else '{}' end);
   return v_id;
 end $$;
 

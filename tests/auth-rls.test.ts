@@ -7,6 +7,7 @@ import {
   appClient, superClient, makeFixture, dsj, post, actAs, setClaims, authOf, createAuthUsers,
   expectCode, count, TEST_URL, type Fixture,
 } from './helpers.js';
+import { agentMeta } from './helpers.js';
 import { withSession } from '../modules/auth/index.js';
 
 let db: pg.Client;
@@ -40,8 +41,13 @@ beforeAll(async () => {
     { account_id: a.acct.cash, location_id: a.locA1, credit: '100' },
   ] }));
   await db.query('select ledger.apply_payment($1, $2, 100)', [pay.id, bill.id]);
-  await actAs(db, a.agent);
-  await db.query('select ledger.propose_entry($1::jsonb)', [JSON.stringify(dsj(a, { source_type: 'ap_bill', created_by: undefined, actor_type: undefined }))]);
+  const meta = await agentMeta(db, a.agent);
+  await db.query('select ledger.propose_entry($1::jsonb)', [JSON.stringify(dsj(a, { source_type: 'ap_bill', created_by: undefined, actor_type: undefined, agent: meta }))]);
+  // agents.tool_call and agents.agent_correction rows: a tool call, and a person rejecting a proposal.
+  await db.query(`select agents.authorize_tool($1, 'read_accounts', '{}'::jsonb, $2)`, [meta.run_id, meta.model_call_id]);
+  const rejectMe = (await db.query('select ledger.propose_entry($1::jsonb) id', [JSON.stringify(dsj(a, { source_type: 'ap_bill', created_by: undefined, actor_type: undefined, agent: meta }))])).rows[0].id;
+  await actAs(db, a.user1);
+  await db.query(`select ledger.reject_draft($1, 'isolation fixture')`, [rejectMe]);
   await post(db, dsj(b));
   await seedIntegration(a);
 });
@@ -84,13 +90,13 @@ describe('CI guard: every tenant table has row-level security', () => {
              (select count(*) from pg_policy p
                where p.polrelid = c.oid and 'app_role'::regrole::oid = any(p.polroles))::int as app_policies
         from pg_class c join pg_namespace n on n.oid = c.relnamespace
-       where c.relkind in ('r', 'p') and n.nspname in ('public', 'ledger', 'audit', 'app', 'integration')`);
+       where c.relkind in ('r', 'p') and n.nspname in ('public', 'ledger', 'audit', 'app', 'integration', 'agents')`);
     const missing = rows
       .filter((r) => !GLOBAL_TABLES.includes(r.t))
       .filter((r) => !r.rls || r.app_policies === 0)
       .map((r) => r.t);
     expect(missing).toEqual([]);
-    expect(rows.length).toBeGreaterThanOrEqual(20);
+    expect(rows.length).toBeGreaterThanOrEqual(28);
   });
 
   it('app_role cannot bypass RLS', async () => {
@@ -101,9 +107,9 @@ describe('CI guard: every tenant table has row-level security', () => {
   it("a member of tenant B sees none of tenant A's rows in any tenant table", async () => {
     const { rows: tables } = await su.query(`
       select format('%I.%I', table_schema, table_name) t from information_schema.columns
-       where column_name = 'tenant_id' and table_schema in ('public', 'ledger', 'audit', 'integration')
+       where column_name = 'tenant_id' and table_schema in ('public', 'ledger', 'audit', 'integration', 'agents')
          and table_name <> 'connector_secret'`);
-    expect(tables.length).toBeGreaterThanOrEqual(16);
+    expect(tables.length).toBeGreaterThanOrEqual(24);
     for (const { t } of tables) {
       await actAs(db, a.user2);
       const mine = await count(db, `select count(*) n from ${t} where tenant_id = $1`, [a.tenant]);

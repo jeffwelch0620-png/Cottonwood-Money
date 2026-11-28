@@ -100,9 +100,13 @@ Step 1.0 (Supabase/Render/AWS accounts) waits on the owner; S3 is tested at the 
 Pilot store (owner decision 2026-11-27): Rudd's. Runs Toast; DoorDash direct ordering is connected to
 its Toast (third-party delivery flows through it); its kitchen ships bulk product to Bert's (a
 location transfer, not a sale — intercompany only if they are separate entities).
-Next: step 1.2 (agent runtime, L1: service identities, tool allow-lists, model-call log, per-tenant
-limits, kill switch, corrections as eval examples) — needs an Anthropic API key for live calls.
-Then 1.3 (Toast daily sales and tips; depends on 1.1 + 1.2) — needs Toast API access for Rudd's.
+Step 1.2 done (2026-11-28): migration 0016 + `db/functions/55_agents.sql` + `modules/agents`.
+Registered agents (agent principal + service login), tool allow-lists (`authorize_tool`; DB re-check in
+propose_entry), per-agent policy (amount/account/location/source/vendor/confidence, deny by default),
+kill switch under a row lock, insert-only model/tool call logs (proposals must cite a logged call),
+corrections as labeled examples. Runs use `SimulatedModel` until an Anthropic API key exists.
+207/207 tests. See README "Agent runtime".
+Next: 1.3 (Toast daily sales and tips; depends on 1.1 + 1.2) — needs Toast API access for Rudd's.
 
 ## Test conventions (step 5+)
 - Every app_role session needs claims: `actAs(db, principalId)` in tests; `withSession()` in app code.
@@ -116,6 +120,9 @@ Then 1.3 (Toast daily sales and tips; depends on 1.1 + 1.2) — needs Toast API 
 - Worker tests: a `pg.Pool` as the worker; queue calls `set local role worker_role`; tenant work via
   `ctx.asTenant`. Pass `retryInSeconds: () => 0` to retry at once; simulate time passing by moving
   `locked_until` / `run_after` / `lease_until` as superuser.
+- Agents: every fixture registers `f.agent` (agent `f.agentId`) with all tools and a wide policy.
+  Agent proposals need `agent: await agentMeta(db, principal)`; `post()` adds it for agent creators.
+  Runtime tests: `new AgentRuntime({ pool, model: new SimulatedModel(script), tools: standardTools })`.
 - API tests: `buildServer` + `app.inject` with HS256 tokens (tests/api.test.ts `as(fx, principal)`).
 - Two people = two sessions: a different creator is only accepted through `approve_draft`
   (`_post`'s `p_draft`); `post()` in tests routes caller≠creator through propose → approve.

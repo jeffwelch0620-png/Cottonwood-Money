@@ -3,6 +3,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import pg from 'pg';
 import { appClient, superClient, makeFixture, dsj, post, actAs, authOf, expectCode, waitUntilBlocked, TEST_URL, type Fixture } from './helpers.js';
+import { agentMeta, isAgent } from './helpers.js';
 
 let db: pg.Client;
 let su: pg.Client;
@@ -23,6 +24,7 @@ const draftOf = (fx: Fixture, over: Record<string, unknown> = {}) => {
   return e;
 };
 const propose = async (as: string, entry: Record<string, unknown>) => {
+  if (isAgent(as)) entry = { ...entry, agent: await agentMeta(db, as) };
   await actAs(db, as);
   return (await db.query('select ledger.propose_entry($1::jsonb) id', [JSON.stringify(entry)])).rows[0].id as string;
 };

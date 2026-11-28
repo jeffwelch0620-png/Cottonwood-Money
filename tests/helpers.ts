@@ -29,6 +29,31 @@ export async function setClaims(db: pg.ClientBase, claims: Record<string, unknow
   await db.query(`select set_config('request.jwt.claims', $1, false)`, [claims ? JSON.stringify(claims) : '']);
 }
 
+/** Principals registered as agents (their proposals need agent metadata). */
+const agentPrincipals = new Set<string>();
+const agentRuns = new Map<string, { run_id: string; model_call_id: string }>();
+
+/**
+ * Agent metadata for a proposal: a run of this agent and a logged model call in it (step 1.2).
+ * Leaves the session acting as the agent. One run per agent per connection is reused.
+ */
+export async function agentMeta(db: pg.ClientBase, agentPrincipal: string, confidence = 0.9) {
+  await actAs(db, agentPrincipal);
+  const key = `${agentPrincipal}:${(db as any).processID ?? ''}`;
+  let meta = agentRuns.get(key) as { run_id: string; model_call_id: string } | undefined;
+  const open = meta && (await db.query(`select 1 from agents.agent_run where id = $1 and status = 'running'`, [meta.run_id])).rowCount;
+  if (!open) {
+    const run = (await db.query(`select agents.start_run('test proposal') id`)).rows[0].id;
+    const call = (await db.query(`select agents.log_model_call($1, $2::jsonb) id`, [run, JSON.stringify({
+      model: 'simulated', model_version: 'simulated-1', request: { test: true }, output: [], stop_reason: 'end_turn' })])).rows[0].id;
+    meta = { run_id: run, model_call_id: call };
+    agentRuns.set(key, meta);
+  }
+  return { ...meta, confidence };
+}
+
+export const isAgent = (principal: string) => agentPrincipals.has(principal);
+
 /** principal id -> its login and tenant, so tests can act as any fixture principal. */
 const actors = new Map<string, { auth: string; tenant: string }>();
 
@@ -87,6 +112,7 @@ export interface Fixture {
   user1: string;
   user2: string;
   agent: string;
+  agentId: string; // agents.agent row of `agent`
   integration: string;
   clerk: string;   // bookkeeper, location A1 only, approval limit 1000
   viewer: string;
@@ -180,7 +206,17 @@ export async function makeFixture(db: pg.ClientBase): Promise<Fixture> {
   await member(clerkAuth, 'bookkeeper', { location_ids: [locA1], approval_limit: '1000' });
   const clerk = await principal('user', 'Store 1 bookkeeper', clerkAuth);
 
-  return { tenant, user1, user2, agent, integration, clerk, viewer, entityA, entityB, locA1, locA2, locB1, acct, periods, monthsA, doc };
+  // Step 1.2: the agent principal is a registered agent with every tool and a wide policy.
+  await setClaims(db, { sub: ownerAuth, tenant_id: tenant, aal: 'aal2' });
+  const agentId = await one(`select agents.create_agent($1::jsonb) as id`,
+    [JSON.stringify({ principal_id: agent, name: 'AP agent v1', kind: 'ap' })]);
+  await db.query(`select agents.set_agent_tools($1, agents.known_tools())`, [agentId]);
+  await db.query(`select agents.set_agent_policy($1, $2::jsonb)`, [agentId, JSON.stringify({
+    max_amount: '1000000', min_confidence: '0',
+    allowed_source_types: ['pos_dsj', 'ap_bill', 'ap_payment', 'ar_invoice', 'ar_receipt', 'bank', 'payroll', 'inventory', 'manual'] })]);
+  agentPrincipals.add(agent);
+
+  return { tenant, user1, user2, agent, agentId, integration, clerk, viewer, entityA, entityB, locA1, locA2, locB1, acct, periods, monthsA, doc };
 }
 
 /** A valid daily-sales entry for entity A; override any field. */
@@ -213,7 +249,8 @@ export async function post(db: pg.ClientBase, entry: unknown, as?: string) {
   // Two people (caller is not the creator): the creator proposes a draft in their own session and
   // the caller approves it, which is the only way the ledger accepts a different creator.
   if (caller && e.created_by && caller !== e.created_by && actors.has(caller) && actors.has(e.created_by)) {
-    const { approved_by: _a, allow_soft_close, created_by: _c, actor_type: _t, idempotency_key: _k, ...draft } = e;
+    const { approved_by: _a, allow_soft_close, created_by: _c, actor_type: _t, idempotency_key: _k, ...draft } = e as Record<string, any>;
+    if (isAgent(e.created_by)) draft.agent = await agentMeta(db, e.created_by);
     await actAs(db, e.created_by);
     const d = (await db.query('select ledger.propose_entry($1::jsonb) id', [JSON.stringify(draft)])).rows[0].id;
     await actAs(db, caller);
