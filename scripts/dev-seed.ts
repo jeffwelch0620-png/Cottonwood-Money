@@ -47,6 +47,10 @@ await member('controller', 'controller', 'user', 'Sam Ortiz');
 await member('bookkeeper', 'bookkeeper', 'user', 'Riley Chen', { loc: [harbor], limit: '2500' });
 const agentP = await member('agent', 'service', 'agent', 'AP agent');
 const toastP = await member('toast', 'service', 'integration', 'Toast connector');
+// Step 1.2: register the AP agent (tools + policy); unregistered agents cannot propose.
+const agentId = (await one(`select agents.create_agent($1::jsonb) id`, [JSON.stringify({ principal_id: agentP, name: 'AP agent', kind: 'ap' })])).id as string;
+await one(`select agents.set_agent_tools($1, array['read_accounts','read_locations','read_evidence','propose_entry'])`, [agentId]);
+await one(`select agents.set_agent_policy($1, $2::jsonb)`, [agentId, JSON.stringify({ max_amount: '10000', min_confidence: '0.7', allowed_source_types: ['ap_bill'] })]);
 const acct = async (n: string) => (await one('select id from account where number = $1', [n])).id as string;
 const A = { cash: await acct('1010'), clearing: await acct('1210'), ap: await acct('2010'), food: await acct('4010'), bev: await acct('4110'),
             cogs: await acct('5010'), equity: await acct('3010'), rent: await acct('8010'), tax: await acct('2210') };
@@ -95,9 +99,14 @@ for (const p of periods.slice(0, 9)) await one(`select ledger.close_period($1, '
 for (const p of periods.slice(0, 6)) await one('select ledger.seal_period($1)', [p]);
 await one(`select ledger.close_period($1, 'soft')`, [periods[9]]);
 // Waiting for approval: an agent-proposed bill and a bookkeeper accrual.
-await as('agent');
+await as('agent', 'aal1');
+const agentRun = (await one(`select agents.start_run('code invoice 88213') id`)).id as string;
+const agentCall = (await one(`select agents.log_model_call($1, $2::jsonb) id`, [agentRun, JSON.stringify({
+  model: 'simulated', model_version: 'demo-seed', request: { invoice: '88213' }, stop_reason: 'tool_use' })])).id as string;
 await one('select ledger.propose_entry($1::jsonb)', [JSON.stringify({ tenant_id: tenant, entity_id: ent, entry_date: '2026-11-18', source_type: 'ap_bill', memo: 'Coastal Seafood invoice 88213 (extracted by AP agent)',
-  evidence_ids: [await doc('invoice')], lines: [L(A.cogs, harbor, '4280.50', '0'), L(A.ap, harbor, '0', '4280.50')] })]);
+  evidence_ids: [await doc('invoice')], lines: [L(A.cogs, harbor, '4280.50', '0'), L(A.ap, harbor, '0', '4280.50')],
+  agent: { run_id: agentRun, model_call_id: agentCall, confidence: 0.93 } })]);
+await one(`select agents.finish_run($1, 'succeeded')`, [agentRun]);
 await as('bookkeeper');
 await one('select ledger.propose_entry($1::jsonb)', [JSON.stringify({ tenant_id: tenant, entity_id: ent, entry_date: '2026-11-20', source_type: 'manual', memo: 'Reclass beverage comps',
   lines: [L(A.food, harbor, '310.00', '0'), L(A.bev, harbor, '0', '310.00')] })]);
